@@ -34,7 +34,7 @@ impl Display for ConfigError {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Config {
     pub default_session: Option<String>,
     pub display_full_path: Option<bool>,
@@ -275,11 +275,7 @@ impl Config {
                 .iter()
                 .filter_map(|b| {
                     if let Ok(expanded) = shellexpand::full(b) {
-                        if let Ok(path) = PathBuf::from(expanded.to_string()).canonicalize() {
-                            Some(path)
-                        } else {
-                            None
-                        }
+                        PathBuf::from(expanded.to_string()).canonicalize().ok()
                     } else {
                         None
                     }
@@ -313,7 +309,7 @@ impl Config {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SearchDirectory {
     pub path: PathBuf,
     pub depth: usize,
@@ -325,14 +321,14 @@ impl SearchDirectory {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Session {
     pub name: Option<String>,
     pub path: Option<String>,
     pub windows: Option<Vec<Window>>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Window {
     pub name: Option<String>,
     pub path: Option<String>,
@@ -340,7 +336,7 @@ pub struct Window {
     pub command: Option<String>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Pane {}
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]

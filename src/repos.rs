@@ -10,10 +10,10 @@ use jj_lib::{
     workspace::{WorkingCopyFactories, Workspace},
 };
 use std::{
-    collections::{HashMap, VecDeque},
-    fs::{self},
+    collections::HashMap,
     path::{Path, PathBuf},
     process::{self, Stdio},
+    sync::{Arc, Mutex},
 };
 
 use crate::{
@@ -60,13 +60,13 @@ impl Worktree for Workspace {
 }
 
 pub enum RepoProvider {
-    Git(Repository),
+    Git(Box<Repository>),
     Jujutsu(Workspace),
 }
 
 impl From<gix::Repository> for RepoProvider {
     fn from(repo: gix::Repository) -> Self {
-        Self::Git(repo)
+        Self::Git(Box::new(repo))
     }
 }
 
@@ -74,7 +74,7 @@ impl RepoProvider {
     pub fn open(path: &Path, config: &Config) -> Result<Self> {
         fn open_git(path: &Path) -> Result<RepoProvider> {
             gix::open(path)
-                .map(RepoProvider::Git)
+                .map(|repo| RepoProvider::Git(Box::new(repo)))
                 .change_context(TmsError::GitError)
         }
 
@@ -125,7 +125,7 @@ impl RepoProvider {
 
     pub fn is_worktree(&self) -> bool {
         match self {
-            RepoProvider::Git(repo) => !repo.main_repo().is_ok_and(|r| r == *repo),
+            RepoProvider::Git(repo) => !repo.main_repo().is_ok_and(|r| r == **repo),
             RepoProvider::Jujutsu(repo) => {
                 let repo_path = repo.repo_path();
                 let workspace_repo_path = repo.workspace_root().join(".jj/repo");
@@ -150,7 +150,7 @@ impl RepoProvider {
 
     pub fn work_dir(&self) -> Option<&Path> {
         match self {
-            RepoProvider::Git(repo) => repo.work_dir(),
+            RepoProvider::Git(repo) => repo.workdir(),
             RepoProvider::Jujutsu(repo) => Some(repo.workspace_root()),
         }
     }
@@ -240,7 +240,7 @@ impl RepoProvider {
                 .collect()),
 
             RepoProvider::Jujutsu(workspace) => {
-                let mut repos: Vec<RepoProvider> = Vec::new();
+                let repos: Arc<Mutex<Vec<RepoProvider>>> = Arc::new(Mutex::new(Vec::new()));
 
                 search_dirs(config, |_, repo| {
                     if !repo.is_worktree() {
@@ -250,13 +250,20 @@ impl RepoProvider {
                         return Ok(());
                     };
                     if workspace.repo_path() == path {
-                        repos.push(repo);
+                        repos.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?.push(repo);
                     }
                     Ok(())
                 })?;
 
+                let mut repos = Arc::try_unwrap(repos)
+                    .map_err(|_| TmsError::IoError)
+                    .change_context(TmsError::IoError)?
+                    .into_inner()
+                    .map_err(|_| TmsError::IoError)
+                    .change_context(TmsError::IoError)?;
+
                 if self.is_bare() {
-                    if let Ok(read_dir) = fs::read_dir(self.path()) {
+                    if let Ok(read_dir) = std::fs::read_dir(self.path()) {
                         let mut sub = read_dir
                             .filter_map(|entry| entry.ok())
                             .map(|dir| dir.path())
@@ -287,7 +294,7 @@ impl RepoProvider {
 }
 
 pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
-    let mut repos: HashMap<String, Vec<Session>> = HashMap::new();
+    let repos: Arc<Mutex<HashMap<String, Vec<Session>>>> = Arc::new(Mutex::new(HashMap::new()));
 
     search_dirs(config, |file, repo| {
         if repo.is_worktree() {
@@ -302,7 +309,8 @@ pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
             })?
             .to_string()?;
 
-        let session = Session::new(session_name, SessionType::Git(repo));
+        let session = Session::new(session_name, SessionType::Git(Box::new(repo)));
+        let mut repos = repos.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?;
         if let Some(list) = repos.get_mut(&session.name) {
             list.push(session);
         } else {
@@ -310,71 +318,147 @@ pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
         }
         Ok(())
     })?;
+    
+    let repos = Arc::try_unwrap(repos)
+        .map_err(|_| TmsError::IoError)
+        .change_context(TmsError::IoError)?
+        .into_inner()
+        .map_err(|_| TmsError::IoError)
+        .change_context(TmsError::IoError)?;
     Ok(repos)
 }
 
-fn search_dirs<F>(config: &Config, mut f: F) -> Result<()>
+fn search_dirs<F>(config: &Config, f: F) -> Result<()>
 where
-    F: FnMut(SearchDirectory, RepoProvider) -> Result<()>,
+    F: Fn(SearchDirectory, RepoProvider) -> Result<()>,
 {
-    {
-        let directories = config.search_dirs().change_context(TmsError::ConfigError)?;
-        let mut to_search: VecDeque<SearchDirectory> = directories.into();
+    let directories = config.search_dirs().change_context(TmsError::ConfigError)?;
+    let to_search: Arc<Mutex<Vec<SearchDirectory>>> = Arc::new(Mutex::new(directories));
 
-        let excluder = if let Some(excluded_dirs) = &config.excluded_dirs {
-            Some(
-                AhoCorasickBuilder::new()
-                    .match_kind(MatchKind::LeftmostFirst)
-                    .build(excluded_dirs)
-                    .change_context(TmsError::IoError)?,
-            )
-        } else {
-            None
-        };
+    let excluder = if let Some(excluded_dirs) = &config.excluded_dirs {
+        Some(Arc::new(
+            AhoCorasickBuilder::new()
+                .match_kind(MatchKind::LeftmostFirst)
+                .build(excluded_dirs)
+                .change_context(TmsError::IoError)?,
+        ))
+    } else {
+        None
+    };
 
-        while let Some(file) = to_search.pop_front() {
-            if let Some(ref excluder) = excluder {
-                if excluder.is_match(&file.path.to_string()?) {
-                    continue;
-                }
-            }
+    // Use tokio runtime for async directory scanning
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(num_cpus::get())
+        .build()
+        .change_context(TmsError::IoError)?;
 
-            if let Ok(repo) = RepoProvider::open(&file.path, config) {
-                f(file, repo)?;
-            } else if file.path.is_dir() && file.depth > 0 {
-                match fs::read_dir(&file.path) {
-                    Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                        eprintln!(
-                        "Warning: insufficient permissions to read '{0}'. Skipping directory...",
-                        file.path.to_string()?
-                    );
+    runtime.block_on(async {
+        let mut tasks = Vec::new();
+
+        loop {
+            // Try to get the next directory to process
+            let file = {
+                let mut search_queue = to_search.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?;
+                search_queue.pop()
+            };
+
+            match file {
+                Some(file) => {
+                    // We have a directory to process
+                    if let Some(ref excluder) = excluder {
+                        if excluder.is_match(&file.path.to_string()?) {
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        let report = report!(e)
-                            .change_context(TmsError::IoError)
-                            .attach_printable(format!("Could not read directory {:?}", file.path));
-                        return Err(report);
-                    }
-                    Ok(read_dir) => {
-                        let mut subdirs = read_dir
-                            .filter_map(|dir_entry| {
-                                if let Ok(dir) = dir_entry {
-                                    Some(SearchDirectory::new(dir.path(), file.depth - 1))
-                                } else {
-                                    None
+
+                    let to_search_clone = Arc::clone(&to_search);
+                    let excluder_clone = excluder.clone();
+                    let f_ref = &f;
+                    
+                    // Check if it's a repo (blocking operation)
+                    if let Ok(repo) = RepoProvider::open(&file.path, config) {
+                        f_ref(file, repo)?;
+                    } else if file.path.is_dir() && file.depth > 0 {
+                        // Scan directory asynchronously
+                        let task = tokio::spawn(async move {
+                            match tokio::fs::read_dir(&file.path).await {
+                                Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                                    if let Ok(path_str) = file.path.to_string() {
+                                        eprintln!(
+                                            "Warning: insufficient permissions to read '{0}'. Skipping directory...",
+                                            path_str
+                                        );
+                                    }
+                                    Ok(())
                                 }
-                            })
-                            .collect::<VecDeque<SearchDirectory>>();
+                                Err(e) => {
+                                    Err(report!(e)
+                                        .change_context(TmsError::IoError)
+                                        .attach_printable(format!("Could not read directory {:?}", file.path)))
+                                }
+                                Ok(mut read_dir) => {
+                                    let mut subdirs = Vec::new();
+                                    while let Ok(Some(dir_entry)) = read_dir.next_entry().await {
+                                        let path = dir_entry.path();
+                                        if path.is_dir() {
+                                            // Check exclusion before adding
+                                            if let Some(ref excluder) = excluder_clone {
+                                                if let Ok(path_str) = path.to_string() {
+                                                    if excluder.is_match(&path_str) {
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            subdirs.push(SearchDirectory::new(path, file.depth - 1));
+                                        }
+                                    }
 
-                        if !subdirs.is_empty() {
-                            to_search.append(&mut subdirs);
+                                    if !subdirs.is_empty() {
+                                        if let Ok(mut search_queue) = to_search_clone.lock() {
+                                            search_queue.extend(subdirs);
+                                        }
+                                    }
+                                    Ok(())
+                                }
+                            }
+                        });
+
+                        tasks.push(task);
+
+                        // Limit concurrent tasks
+                        if tasks.len() >= 100 {
+                            while tasks.len() > 50 {
+                                if let Some(task) = tasks.pop() {
+                                    task.await.change_context(TmsError::IoError)??;
+                                }
+                            }
                         }
                     }
                 }
+                None => {
+                    // Queue is empty, check if we have pending tasks
+                    if tasks.is_empty() {
+                        // No more work to do
+                        break;
+                    }
+                    
+                    // Wait for at least one task to complete, which might add more directories
+                    if let Some(task) = tasks.pop() {
+                        task.await.change_context(TmsError::IoError)??;
+                    }
+                    
+                    // Continue the loop to check if new items were added to the queue
+                }
             }
         }
+
+        // Wait for all remaining tasks
+        for task in tasks {
+            task.await.change_context(TmsError::IoError)??;
+        }
+
         Ok(())
-    }
+    })
 }
 
 pub fn find_submodules<'a>(
@@ -388,7 +472,7 @@ pub fn find_submodules<'a>(
             Ok(Some(repo)) => repo,
             _ => continue,
         };
-        let path = match repo.work_dir() {
+        let path = match repo.workdir() {
             Some(path) => path,
             _ => continue,
         };
@@ -410,7 +494,7 @@ pub fn find_submodules<'a>(
                 find_submodules(submodules, &name, repos, config)?;
             }
         }
-        let session = Session::new(session_name, SessionType::Git(repo.into()));
+        let session = Session::new(session_name, SessionType::Git(Box::new(repo.into())));
         repos.insert_session(name, session);
     }
     Ok(())

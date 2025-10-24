@@ -20,7 +20,7 @@ pub struct Session {
 }
 
 pub enum SessionType {
-    Git(RepoProvider),
+    Git(Box<RepoProvider>),
     Bookmark(PathBuf),
 }
 

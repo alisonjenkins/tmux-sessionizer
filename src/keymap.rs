@@ -178,7 +178,7 @@ impl From<KeyEvent> for Key {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Keymap(#[serde(serialize_with = "sorted_map")] pub HashMap<Key, PickerAction>);
 
 fn sorted_map<S: Serializer, K: Serialize + Ord + Debug, V: Serialize + Debug>(

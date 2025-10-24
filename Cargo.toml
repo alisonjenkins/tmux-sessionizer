@@ -17,8 +17,8 @@ exclude = ["images/*"]
 
 [dependencies]
 
-gix = { version = "0.70.0", features = ["attributes"] }
-jj-lib = "0.30.0"
+gix = { version = "0.71", features = ["attributes"] }
+jj-lib = "0.30"
 clap = { version = "4.5", features = ["cargo", "derive"] }
 clap_complete = { version = "4.5", features = [ "unstable-dynamic" ] }
 serde_derive = "1.0"
@@ -30,9 +30,12 @@ shell-words = "1.1"
 config = { version = "0.15", default-features = false, features = ["toml"] }
 toml = "0.8"
 dirs = "6.0"
-nucleo = "0.5.0"
+nucleo = "0.5"
 ratatui = { version = "0.29", features = ["serde"] }
 crossterm = "0.28"
+tokio = { version = "1.48", features = ["full"] }
+futures = "0.3"
+num_cpus = "1.16"
 
 [lib]
 name = "tms"
