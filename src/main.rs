@@ -68,8 +68,8 @@ async fn main() -> Result<()> {
     }
 
     // Now it's safe to proceed with streaming (trace logs are suppressed by default)
-    let receiver = match create_sessions_streaming(&config).await {
-        Ok(receiver) => receiver,
+    let (receiver, sessions_map) = match create_sessions_streaming(&config).await {
+        Ok((receiver, sessions_map)) => (receiver, sessions_map),
         Err(e) => {
             eprintln!("Error creating session stream: {}", e);
             std::process::exit(1);
@@ -90,15 +90,31 @@ async fn main() -> Result<()> {
         }
     };
 
-    // For now, create a simple session from the selected string
-    // TODO: We need to store the actual sessions for selection
-    if tmux.session_exists(&selected_str) {
-        tmux.switch_to_session(&selected_str);
-    } else {
-        // Create a new session - this is a simplified version
-        // In the full implementation, we'd need to track the actual session objects
-        tmux.new_session(Some(&selected_str), None);
-        tmux.switch_to_session(&selected_str);
+    // Look up the actual session object to get proper path handling
+    match sessions_map.lock() {
+        Ok(sessions) => {
+            if let Some(session) = sessions.get(&selected_str) {
+                // Use the proper session.switch_to method which handles paths correctly
+                if let Err(e) = session.switch_to(&tmux, &config) {
+                    eprintln!("Error switching to session: {}", e);
+                    std::process::exit(1);
+                }
+            } else {
+                // Fallback: if we can't find the session, try to create it as a simple session
+                // This shouldn't happen in normal operation
+                eprintln!("Warning: Could not find session data for '{}', creating simple session", selected_str);
+                if tmux.session_exists(&selected_str) {
+                    tmux.switch_to_session(&selected_str);
+                } else {
+                    tmux.new_session(Some(&selected_str), None);
+                    tmux.switch_to_session(&selected_str);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error accessing session data: {}", e);
+            std::process::exit(1);
+        }
     }
 
     Ok(())

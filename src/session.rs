@@ -118,9 +118,15 @@ pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
 }
 
 /// Create a streaming session channel that yields sessions as repositories are found
-pub async fn create_sessions_streaming(config: &Config) -> Result<mpsc::UnboundedReceiver<String>> {
+/// Returns a tuple of (display_names_receiver, session_container)
+/// The session_container will be populated as sessions are found
+pub async fn create_sessions_streaming(config: &Config) -> Result<(mpsc::UnboundedReceiver<String>, std::sync::Arc<std::sync::Mutex<BTreeMap<String, Session>>>)> {
     let (tx, rx) = mpsc::unbounded_channel();
     let (session_tx, session_rx) = mpsc::unbounded_channel();
+    
+    // Create a shared session container to collect sessions as they're found
+    let sessions_map = std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::<String, Session>::new()));
+    let sessions_map_clone = sessions_map.clone();
     
     let config_clone = config.clone();
     
@@ -150,8 +156,14 @@ pub async fn create_sessions_streaming(config: &Config) -> Result<mpsc::Unbounde
         let visible_name = if config.display_full_path == Some(true) {
             bookmark_path.display().to_string()
         } else {
-            bookmark_name
+            bookmark_name.clone()
         };
+        
+        // Store the bookmark session in our map
+        let bookmark_session = Session::new(bookmark_name, SessionType::Bookmark(bookmark_path));
+        if let Ok(mut map) = sessions_map_clone.lock() {
+            map.insert(visible_name.clone(), bookmark_session);
+        }
         
         if tx.send(visible_name).is_err() {
             break; // Receiver was dropped
@@ -159,6 +171,7 @@ pub async fn create_sessions_streaming(config: &Config) -> Result<mpsc::Unbounde
     }
     
     let config_clone = config.clone();
+    let sessions_map_clone2 = sessions_map_clone.clone();
     // Process streaming repository sessions
     tokio::spawn(async move {
         let mut session_rx = session_rx;
@@ -169,13 +182,18 @@ pub async fn create_sessions_streaming(config: &Config) -> Result<mpsc::Unbounde
                 session.name.clone()
             };
             
+            // Store the session in our map
+            if let Ok(mut map) = sessions_map_clone2.lock() {
+                map.insert(visible_name.clone(), session);
+            }
+            
             if tx.send(visible_name).is_err() {
                 break; // Receiver was dropped
             }
         }
     });
     
-    Ok(rx)
+    Ok((rx, sessions_map))
 }
 
 fn generate_session_container(
