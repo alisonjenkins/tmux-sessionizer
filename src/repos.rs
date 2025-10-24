@@ -10,7 +10,7 @@ use jj_lib::{
     workspace::{WorkingCopyFactories, Workspace},
 };
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::{self, Stdio},
     sync::{Arc, Mutex},
@@ -250,7 +250,11 @@ impl RepoProvider {
                         return Ok(());
                     };
                     if workspace.repo_path() == path {
-                        repos.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?.push(repo);
+                        repos
+                            .lock()
+                            .map_err(|_| TmsError::IoError)
+                            .change_context(TmsError::IoError)?
+                            .push(repo);
                     }
                     Ok(())
                 })?;
@@ -293,8 +297,8 @@ impl RepoProvider {
     }
 }
 
-pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
-    let repos: Arc<Mutex<HashMap<String, Vec<Session>>>> = Arc::new(Mutex::new(HashMap::new()));
+pub fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
+    let repos: Arc<Mutex<BTreeMap<String, Vec<Session>>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
     search_dirs(config, |file, repo| {
         if repo.is_worktree() {
@@ -310,7 +314,10 @@ pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
             .to_string()?;
 
         let session = Session::new(session_name, SessionType::Git(Box::new(repo)));
-        let mut repos = repos.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?;
+        let mut repos = repos
+            .lock()
+            .map_err(|_| TmsError::IoError)
+            .change_context(TmsError::IoError)?;
         if let Some(list) = repos.get_mut(&session.name) {
             list.push(session);
         } else {
@@ -318,7 +325,7 @@ pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
         }
         Ok(())
     })?;
-    
+
     let repos = Arc::try_unwrap(repos)
         .map_err(|_| TmsError::IoError)
         .change_context(TmsError::IoError)?
@@ -374,7 +381,7 @@ where
                     let to_search_clone = Arc::clone(&to_search);
                     let excluder_clone = excluder.clone();
                     let f_ref = &f;
-                    
+
                     // Check if it's a repo (blocking operation)
                     if let Ok(repo) = RepoProvider::open(&file.path, config) {
                         f_ref(file, repo)?;
@@ -441,12 +448,12 @@ where
                         // No more work to do
                         break;
                     }
-                    
+
                     // Wait for at least one task to complete, which might add more directories
                     if let Some(task) = tasks.pop() {
                         task.await.change_context(TmsError::IoError)??;
                     }
-                    
+
                     // Continue the loop to check if new items were added to the queue
                 }
             }

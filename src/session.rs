@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -92,7 +92,7 @@ pub trait SessionContainer {
     fn list(&self) -> Vec<String>;
 }
 
-impl SessionContainer for HashMap<String, Session> {
+impl SessionContainer for BTreeMap<String, Session> {
     fn find_session(&self, name: &str) -> Option<&Session> {
         self.get(name)
     }
@@ -102,10 +102,8 @@ impl SessionContainer for HashMap<String, Session> {
     }
 
     fn list(&self) -> Vec<String> {
-        let mut list: Vec<String> = self.keys().map(|s| s.to_owned()).collect();
-        list.sort();
-
-        list
+        // BTreeMap keys are already sorted, so we can just collect them
+        self.keys().map(|s| s.to_owned()).collect()
     }
 }
 
@@ -119,10 +117,10 @@ pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
 }
 
 fn generate_session_container(
-    mut sessions: HashMap<String, Vec<Session>>,
+    mut sessions: BTreeMap<String, Vec<Session>>,
     config: &Config,
 ) -> Result<impl SessionContainer> {
-    let mut ret = HashMap::new();
+    let mut ret = BTreeMap::new();
 
     for list in sessions.values_mut() {
         if list.len() == 1 {
@@ -216,8 +214,8 @@ fn deduplicate_sessions(duplicate_sessions: &mut Vec<Session>) -> Vec<Session> {
 
 fn append_bookmarks(
     config: &Config,
-    mut sessions: HashMap<String, Vec<Session>>,
-) -> Result<HashMap<String, Vec<Session>>> {
+    mut sessions: BTreeMap<String, Vec<Session>>,
+) -> Result<BTreeMap<String, Vec<Session>>> {
     let bookmarks = config.bookmark_paths();
 
     for path in bookmarks {
@@ -239,6 +237,7 @@ fn append_bookmarks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn verify_session_name_deduplication() {
@@ -262,5 +261,42 @@ mod tests {
         assert_eq!(deduplicated[0].name, "projects/proj2/test");
         assert_eq!(deduplicated[1].name, "to/proj2/test");
         assert_eq!(deduplicated[2].name, "to/proj1/test");
+    }
+
+    #[test]
+    fn verify_btreemap_maintains_alphabetical_order() {
+        let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
+
+        // Insert sessions in non-alphabetical order
+        sessions.insert(
+            "zebra".to_string(),
+            Session::new("zebra".into(), SessionType::Bookmark("/path/zebra".into())),
+        );
+        sessions.insert(
+            "apple".to_string(),
+            Session::new("apple".into(), SessionType::Bookmark("/path/apple".into())),
+        );
+        sessions.insert(
+            "middle".to_string(),
+            Session::new(
+                "middle".into(),
+                SessionType::Bookmark("/path/middle".into()),
+            ),
+        );
+        sessions.insert(
+            "banana".to_string(),
+            Session::new(
+                "banana".into(),
+                SessionType::Bookmark("/path/banana".into()),
+            ),
+        );
+
+        // Verify list() returns them in alphabetical order
+        let list = sessions.list();
+        assert_eq!(list, vec!["apple", "banana", "middle", "zebra"]);
+
+        // Verify keys are iterated in sorted order
+        let keys: Vec<_> = sessions.keys().cloned().collect();
+        assert_eq!(keys, vec!["apple", "banana", "middle", "zebra"]);
     }
 }
