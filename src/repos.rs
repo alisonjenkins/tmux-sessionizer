@@ -356,82 +356,98 @@ where
         let mut tasks = Vec::new();
 
         loop {
+            // Try to get the next directory to process
             let file = {
                 let mut search_queue = to_search.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?;
                 search_queue.pop()
             };
 
-            let Some(file) = file else {
-                break;
-            };
-
-            if let Some(ref excluder) = excluder {
-                if excluder.is_match(&file.path.to_string()?) {
-                    continue;
-                }
-            }
-
-            let to_search_clone = Arc::clone(&to_search);
-            let excluder_clone = excluder.clone();
-            let f_ref = &f;
-            
-            // Check if it's a repo (blocking operation)
-            if let Ok(repo) = RepoProvider::open(&file.path, config) {
-                f_ref(file, repo)?;
-            } else if file.path.is_dir() && file.depth > 0 {
-                // Scan directory asynchronously
-                let task = tokio::spawn(async move {
-                    match tokio::fs::read_dir(&file.path).await {
-                        Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                            if let Ok(path_str) = file.path.to_string() {
-                                eprintln!(
-                                    "Warning: insufficient permissions to read '{0}'. Skipping directory...",
-                                    path_str
-                                );
-                            }
-                            Ok(())
+            match file {
+                Some(file) => {
+                    // We have a directory to process
+                    if let Some(ref excluder) = excluder {
+                        if excluder.is_match(&file.path.to_string()?) {
+                            continue;
                         }
-                        Err(e) => {
-                            Err(report!(e)
-                                .change_context(TmsError::IoError)
-                                .attach_printable(format!("Could not read directory {:?}", file.path)))
-                        }
-                        Ok(mut read_dir) => {
-                            let mut subdirs = Vec::new();
-                            while let Ok(Some(dir_entry)) = read_dir.next_entry().await {
-                                let path = dir_entry.path();
-                                if path.is_dir() {
-                                    // Check exclusion before adding
-                                    if let Some(ref excluder) = excluder_clone {
-                                        if let Ok(path_str) = path.to_string() {
-                                            if excluder.is_match(&path_str) {
-                                                continue;
+                    }
+
+                    let to_search_clone = Arc::clone(&to_search);
+                    let excluder_clone = excluder.clone();
+                    let f_ref = &f;
+                    
+                    // Check if it's a repo (blocking operation)
+                    if let Ok(repo) = RepoProvider::open(&file.path, config) {
+                        f_ref(file, repo)?;
+                    } else if file.path.is_dir() && file.depth > 0 {
+                        // Scan directory asynchronously
+                        let task = tokio::spawn(async move {
+                            match tokio::fs::read_dir(&file.path).await {
+                                Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                                    if let Ok(path_str) = file.path.to_string() {
+                                        eprintln!(
+                                            "Warning: insufficient permissions to read '{0}'. Skipping directory...",
+                                            path_str
+                                        );
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    Err(report!(e)
+                                        .change_context(TmsError::IoError)
+                                        .attach_printable(format!("Could not read directory {:?}", file.path)))
+                                }
+                                Ok(mut read_dir) => {
+                                    let mut subdirs = Vec::new();
+                                    while let Ok(Some(dir_entry)) = read_dir.next_entry().await {
+                                        let path = dir_entry.path();
+                                        if path.is_dir() {
+                                            // Check exclusion before adding
+                                            if let Some(ref excluder) = excluder_clone {
+                                                if let Ok(path_str) = path.to_string() {
+                                                    if excluder.is_match(&path_str) {
+                                                        continue;
+                                                    }
+                                                }
                                             }
+                                            subdirs.push(SearchDirectory::new(path, file.depth - 1));
                                         }
                                     }
-                                    subdirs.push(SearchDirectory::new(path, file.depth - 1));
+
+                                    if !subdirs.is_empty() {
+                                        if let Ok(mut search_queue) = to_search_clone.lock() {
+                                            search_queue.extend(subdirs);
+                                        }
+                                    }
+                                    Ok(())
                                 }
                             }
+                        });
 
-                            if !subdirs.is_empty() {
-                                if let Ok(mut search_queue) = to_search_clone.lock() {
-                                    search_queue.extend(subdirs);
+                        tasks.push(task);
+
+                        // Limit concurrent tasks
+                        if tasks.len() >= 100 {
+                            while tasks.len() > 50 {
+                                if let Some(task) = tasks.pop() {
+                                    task.await.change_context(TmsError::IoError)??;
                                 }
                             }
-                            Ok(())
                         }
                     }
-                });
-
-                tasks.push(task);
-
-                // Limit concurrent tasks
-                if tasks.len() >= 100 {
-                    while tasks.len() > 50 {
-                        if let Some(task) = tasks.pop() {
-                            task.await.change_context(TmsError::IoError)??;
-                        }
+                }
+                None => {
+                    // Queue is empty, check if we have pending tasks
+                    if tasks.is_empty() {
+                        // No more work to do
+                        break;
                     }
+                    
+                    // Wait for at least one task to complete, which might add more directories
+                    if let Some(task) = tasks.pop() {
+                        task.await.change_context(TmsError::IoError)??;
+                    }
+                    
+                    // Continue the loop to check if new items were added to the queue
                 }
             }
         }
