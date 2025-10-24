@@ -92,10 +92,29 @@
               }
             );
             fmt = craneLib.cargoFmt commonArgs;
+            # Run tests in sandboxed environment - all tests now work without git
             test = craneLib.cargoTest (
               commonArgs
               // {
                 inherit cargoArtifacts;
+                # Include all test files
+                cargoTestExtraArgs = "--all-targets";
+              }
+            );
+            # Separate check for performance benchmarks (can be run independently)
+            performance-tests = craneLib.cargoTest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoTestExtraArgs = "--test performance_benchmark";
+              }
+            );
+            # Real-world benchmark tests
+            benchmark-tests = craneLib.cargoTest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                cargoTestExtraArgs = "--test real_world_benchmark";
               }
             );
           };

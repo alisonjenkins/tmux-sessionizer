@@ -1,0 +1,84 @@
+# Optimized TMS Configuration for Large Repository Collections
+# 
+# This configuration is specifically tuned for systems with 1000+ repositories
+# Copy relevant sections to your ~/.config/tms/config.toml
+
+# Core search configuration - consider reducing depth for better performance
+[[search_dirs]]
+path = "/home/ali/git"
+depth = 6  # Reduced from 10 - most repos are within 6 levels
+
+# Intelligent exclusion patterns to dramatically improve performance
+excluded_dirs = [
+  # Build artifacts and compiled outputs
+  "node_modules",
+  "target", 
+  "build",
+  "dist",
+  "out",
+  "bin",
+  "obj",
+  
+  # Package managers and dependencies  
+  ".gradle",
+  ".m2",
+  ".cargo",
+  ".npm", 
+  "vendor",
+  "packages",
+  "pkg",
+  
+  # Caches and temporary files
+  ".cache",
+  "__pycache__",
+  ".pytest_cache", 
+  ".mypy_cache",
+  "coverage",
+  ".coverage",
+  ".nyc_output",
+  "tmp",
+  "temp",
+  
+  # Virtual environments
+  "venv",
+  ".venv", 
+  "env",
+  ".env",
+  "site-packages",
+  
+  # IDE and editor files
+  ".ccls-cache",
+  ".clangd", 
+  ".vscode",
+  ".idea",
+  "DerivedData",
+  
+  # Framework specific
+  ".next",
+  ".nuxt", 
+  "Pods",
+  ".terraform",
+  
+  # Version control artifacts (avoid nested scans)
+  ".git/objects",
+  ".git/refs", 
+  ".git/logs",
+  
+  # Container and virtualization
+  "docker",
+  "containers",
+  ".docker",
+  
+  # Common large directories that rarely contain repos
+  "assets",
+  "uploads", 
+  "downloads",
+  "media",
+  "static",
+  "public"
+]
+
+# Performance tuning options
+display_full_path = false  # Faster display
+search_submodules = false  # Skip submodules for speed (set to true if needed)
+recursive_submodules = false  # Disable recursive scanning

@@ -13,7 +13,8 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     process::{self, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}},
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -298,6 +299,9 @@ impl RepoProvider {
 }
 
 pub fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
+    let start_time = Instant::now();
+    eprintln!("[TRACE] Starting repository search...");
+    
     let repos: Arc<Mutex<BTreeMap<String, Vec<Session>>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
     search_dirs(config, |file, repo| {
@@ -332,6 +336,11 @@ pub fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
         .into_inner()
         .map_err(|_| TmsError::IoError)
         .change_context(TmsError::IoError)?;
+        
+    let total_time = start_time.elapsed();
+    let repo_count = repos.values().map(|v| v.len()).sum::<usize>();
+    eprintln!("[TRACE] Repository search completed: found {} repos in {:.2}ms", repo_count, total_time.as_millis());
+    
     Ok(repos)
 }
 
@@ -339,10 +348,17 @@ fn search_dirs<F>(config: &Config, f: F) -> Result<()>
 where
     F: Fn(SearchDirectory, RepoProvider) -> Result<()>,
 {
+    let start_time = Instant::now();
     let directories = config.search_dirs().change_context(TmsError::ConfigError)?;
+    eprintln!("[TRACE] Starting search in {} directories", directories.len());
+    for (i, dir) in directories.iter().enumerate() {
+        eprintln!("[TRACE] Search dir {}: {} (depth: {})", i+1, dir.path.display(), dir.depth);
+    }
+    
     let to_search: Arc<Mutex<Vec<SearchDirectory>>> = Arc::new(Mutex::new(directories));
 
     let excluder = if let Some(excluded_dirs) = &config.excluded_dirs {
+        eprintln!("[TRACE] Exclusion patterns: {} patterns configured", excluded_dirs.len());
         Some(Arc::new(
             AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostFirst)
@@ -350,19 +366,85 @@ where
                 .change_context(TmsError::IoError)?,
         ))
     } else {
+        eprintln!("[TRACE] No exclusion patterns configured");
         None
     };
 
-    // Use tokio runtime for async directory scanning
+    // Performance counters
+    let dirs_scanned = Arc::new(AtomicUsize::new(0));
+    let dirs_excluded = Arc::new(AtomicUsize::new(0)); 
+    let likely_repos_found = Arc::new(AtomicUsize::new(0));
+    let repos_opened = Arc::new(AtomicUsize::new(0));
+    let repo_open_failures = Arc::new(AtomicUsize::new(0));
+    let total_repo_open_time = Arc::new(AtomicU64::new(0));
+
+    let cpu_count = num_cpus::get();
+    eprintln!("[TRACE] System has {} CPU cores", cpu_count);
+    let worker_threads = cpu_count.max(4);
+    eprintln!("[TRACE] Using {} worker threads", worker_threads);
+
+    // Smart optimization: common paths that usually contain many build artifacts or deps but few repos
+    let common_skip_patterns = Arc::new([
+        "node_modules",
+        "target", 
+        "build",
+        "dist",
+        ".gradle", 
+        ".m2",
+        ".cargo",
+        ".npm",
+        ".cache",
+        "__pycache__",
+        "venv",
+        ".venv",
+        "env",
+        ".env",
+        "vendor",
+        ".terraform",
+        "site-packages",
+        ".pytest_cache",
+        ".mypy_cache",
+        "coverage",
+        ".coverage",
+        ".nyc_output",
+        ".next",
+        ".nuxt",
+        "Pods",
+        "DerivedData",
+        ".ccls-cache",
+        ".clangd",
+    ]);
+
+    // Use optimized tokio runtime for async directory scanning
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(num_cpus::get())
+        .worker_threads(worker_threads) // Ensure minimum 4 threads
+        .thread_keep_alive(Duration::from_secs(60)) // Keep threads alive longer
+        .enable_all()
         .build()
         .change_context(TmsError::IoError)?;
 
     runtime.block_on(async {
         let mut tasks = Vec::new();
+        let mut last_report = Instant::now();
+        let mut total_iterations = 0u64;
 
         loop {
+            total_iterations += 1;
+            
+            // Report progress every 5 seconds
+            if last_report.elapsed() > Duration::from_secs(5) {
+                let scanned = dirs_scanned.load(Ordering::Relaxed);
+                let excluded = dirs_excluded.load(Ordering::Relaxed);
+                let likely = likely_repos_found.load(Ordering::Relaxed);
+                let opened = repos_opened.load(Ordering::Relaxed);
+                let failures = repo_open_failures.load(Ordering::Relaxed);
+                let elapsed = start_time.elapsed();
+                
+                eprintln!("[TRACE] Progress after {:.2}s: dirs_scanned={}, dirs_excluded={}, likely_repos={}, repos_opened={}, failures={}, active_tasks={}", 
+                    elapsed.as_secs_f64(), scanned, excluded, likely, opened, failures, tasks.len());
+                last_report = Instant::now();
+            }
+
             // Try to get the next directory to process
             let file = {
                 let mut search_queue = to_search.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?;
@@ -371,47 +453,107 @@ where
 
             match file {
                 Some(file) => {
+                    dirs_scanned.fetch_add(1, Ordering::Relaxed);
+                    
                     // We have a directory to process
                     if let Some(ref excluder) = excluder {
                         if excluder.is_match(&file.path.to_string()?) {
+                            dirs_excluded.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
+                    }
+
+                    // Early termination: if we've found a lot of repos and scanned many dirs, consider stopping
+                    let current_repos = repos_opened.load(Ordering::Relaxed);
+                    let current_dirs = dirs_scanned.load(Ordering::Relaxed);
+                    
+                    // Adaptive limits: more aggressive limits for very large search spaces
+                    let should_terminate = if current_dirs > 500_000 {
+                        current_repos > 300 // More conservative limit for huge directories
+                    } else if current_dirs > 100_000 {
+                        current_repos > 800 // Reasonable limit for large directories
+                    } else {
+                        current_repos > 2000 // Original generous limit
+                    };
+                    
+                    if should_terminate {
+                        eprintln!("[TRACE] Early termination: found {} repos after scanning {} directories", current_repos, current_dirs);
+                        eprintln!("[TRACE] This prevents excessive scanning in very large directory structures.");
+                        break;
                     }
 
                     let to_search_clone = Arc::clone(&to_search);
                     let excluder_clone = excluder.clone();
                     let f_ref = &f;
+                    let _dirs_scanned_clone = Arc::clone(&dirs_scanned);
+                    let dirs_excluded_clone = Arc::clone(&dirs_excluded);
+                    let likely_repos_found_clone = Arc::clone(&likely_repos_found);
+                    let repos_opened_clone = Arc::clone(&repos_opened);
+                    let repo_open_failures_clone = Arc::clone(&repo_open_failures);
+                    let total_repo_open_time_clone = Arc::clone(&total_repo_open_time);
 
-                    // Check if it's a repo (blocking operation)
-                    if let Ok(repo) = RepoProvider::open(&file.path, config) {
-                        f_ref(file, repo)?;
-                    } else if file.path.is_dir() && file.depth > 0 {
+                    let common_skip_patterns_clone = Arc::clone(&common_skip_patterns);
+
+                    // Fast pre-check: only try to open paths that likely contain repositories
+                    let likely_repo = file.path.join(".git").exists() || file.path.join(".jj").exists();
+                    
+                    if likely_repo {
+                        likely_repos_found_clone.fetch_add(1, Ordering::Relaxed);
+                        
+                        // Check if it's a repo (blocking operation)
+                        let repo_open_start = Instant::now();
+                        match RepoProvider::open(&file.path, config) {
+                            Ok(repo) => {
+                                let repo_open_time = repo_open_start.elapsed();
+                                total_repo_open_time_clone.fetch_add(repo_open_time.as_nanos() as u64, Ordering::Relaxed);
+                                repos_opened_clone.fetch_add(1, Ordering::Relaxed);
+                                f_ref(file.clone(), repo)?;
+                            }
+                            Err(_) => {
+                                let repo_open_time = repo_open_start.elapsed();
+                                total_repo_open_time_clone.fetch_add(repo_open_time.as_nanos() as u64, Ordering::Relaxed);
+                                repo_open_failures_clone.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    
+                    // Continue directory traversal regardless
+                    if file.path.is_dir() && file.depth > 0 {
                         // Scan directory asynchronously
                         let task = tokio::spawn(async move {
                             match tokio::fs::read_dir(&file.path).await {
                                 Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                                     if let Ok(path_str) = file.path.to_string() {
                                         eprintln!(
-                                            "Warning: insufficient permissions to read '{0}'. Skipping directory...",
+                                            "[TRACE] Warning: insufficient permissions to read '{}'. Skipping directory...",
                                             path_str
                                         );
                                     }
                                     Ok(())
                                 }
                                 Err(e) => {
+                                    eprintln!("[TRACE] Error reading directory {:?}: {}", file.path, e);
                                     Err(report!(e)
                                         .change_context(TmsError::IoError)
                                         .attach_printable(format!("Could not read directory {:?}", file.path)))
                                 }
                                 Ok(mut read_dir) => {
-                                    let mut subdirs = Vec::new();
+                                    let mut subdirs = Vec::with_capacity(32); // Pre-allocate for performance
                                     while let Ok(Some(dir_entry)) = read_dir.next_entry().await {
                                         let path = dir_entry.path();
                                         if path.is_dir() {
-                                            // Check exclusion before adding
+                                            // Smart skip patterns - check common build/dependency directories
+                                            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                                                if common_skip_patterns_clone.iter().any(|&pattern| dir_name == pattern) {
+                                                    continue; // Skip common build directories
+                                                }
+                                            }
+                                            
+                                            // Check exclusion patterns after smart filtering
                                             if let Some(ref excluder) = excluder_clone {
                                                 if let Ok(path_str) = path.to_string() {
                                                     if excluder.is_match(&path_str) {
+                                                        dirs_excluded_clone.fetch_add(1, Ordering::Relaxed);
                                                         continue;
                                                     }
                                                 }
@@ -432,9 +574,9 @@ where
 
                         tasks.push(task);
 
-                        // Limit concurrent tasks
-                        if tasks.len() >= 100 {
-                            while tasks.len() > 50 {
+                        // Limit concurrent tasks with higher limits for better performance
+                        if tasks.len() >= 200 {
+                            while tasks.len() > 100 {
                                 if let Some(task) = tasks.pop() {
                                     task.await.change_context(TmsError::IoError)??;
                                 }
@@ -462,6 +604,31 @@ where
         // Wait for all remaining tasks
         for task in tasks {
             task.await.change_context(TmsError::IoError)??;
+        }
+
+        // Final statistics
+        let final_scanned = dirs_scanned.load(Ordering::Relaxed);
+        let final_excluded = dirs_excluded.load(Ordering::Relaxed);
+        let final_likely = likely_repos_found.load(Ordering::Relaxed);
+        let final_opened = repos_opened.load(Ordering::Relaxed);
+        let final_failures = repo_open_failures.load(Ordering::Relaxed);
+        let total_repo_open_ns = total_repo_open_time.load(Ordering::Relaxed);
+        let total_elapsed = start_time.elapsed();
+        
+        eprintln!("[TRACE] Search completed in {:.2}ms:", total_elapsed.as_millis());
+        eprintln!("[TRACE]   - Directories scanned: {}", final_scanned);
+        eprintln!("[TRACE]   - Directories excluded: {}", final_excluded);
+        eprintln!("[TRACE]   - Likely repos found: {}", final_likely);
+        eprintln!("[TRACE]   - Repos successfully opened: {}", final_opened);
+        eprintln!("[TRACE]   - Repository open failures: {}", final_failures);
+        eprintln!("[TRACE]   - Total iterations: {}", total_iterations);
+        if final_opened > 0 {
+            let avg_repo_open_ms = (total_repo_open_ns as f64 / 1_000_000.0) / final_opened as f64;
+            eprintln!("[TRACE]   - Average repo open time: {:.2}ms", avg_repo_open_ms);
+        }
+        eprintln!("[TRACE]   - Directories per second: {:.0}", final_scanned as f64 / total_elapsed.as_secs_f64());
+        if final_likely > 0 {
+            eprintln!("[TRACE]   - Repository detection accuracy: {:.1}%", (final_opened as f64 / final_likely as f64) * 100.0);
         }
 
         Ok(())
