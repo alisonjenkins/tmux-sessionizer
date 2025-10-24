@@ -111,7 +111,7 @@ impl<'a> Picker<'a> {
 
     fn main_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
         loop {
-            self.matcher.tick(10);
+            self.matcher.tick(1000);
             self.update_selection();
             terminal
                 .draw(|f| self.render(f))
@@ -464,14 +464,17 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn update_matcher_pattern(&mut self, prev_filter: &str) {
+    fn update_matcher_pattern(&mut self, _prev_filter: &str) {
         self.matcher.pattern.reparse(
             0,
             self.filter.as_str(),
-            CaseMatching::Smart,
+            CaseMatching::Ignore,
             Normalization::Smart,
-            self.filter.starts_with(prev_filter),
+            false,
         );
+        for _ in 0..10 {
+            self.matcher.tick(1000);
+        }
     }
 
     fn delete_word(&mut self) {
