@@ -167,6 +167,8 @@ Available actions are:
 - "delete"
 - "move_up"
 - "move_down"
+- "page_up"
+- "page_down"
 - "cursor_left"
 - "cursor_right"
 - "delete_word"
@@ -174,6 +176,10 @@ Available actions are:
 - "delete_to_line_end"
 - "move_to_line_start"
 - "move_to_line_end"
+
+Default keybindings for page navigation:
+- `PageUp` / `Ctrl+b`: Move up one page
+- `PageDown` / `Ctrl+f`: Move down one page
 
 ## Installation
 

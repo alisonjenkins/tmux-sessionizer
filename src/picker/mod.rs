@@ -52,6 +52,7 @@ pub struct Picker<'a> {
     keymap: Keymap,
     input_position: InputPosition,
     tmux: &'a Tmux,
+    page_size: usize,
 }
 
 impl<'a> Picker<'a> {
@@ -86,6 +87,7 @@ impl<'a> Picker<'a> {
             keymap,
             input_position,
             tmux,
+            page_size: 10, // Default page size, will be updated during render
         }
     }
 
@@ -131,6 +133,8 @@ impl<'a> Picker<'a> {
                         Some(PickerAction::DeleteToLineEnd) => self.delete_to_line(true),
                         Some(PickerAction::MoveUp) => self.move_up(),
                         Some(PickerAction::MoveDown) => self.move_down(),
+                        Some(PickerAction::PageUp) => self.page_up(),
+                        Some(PickerAction::PageDown) => self.page_down(),
                         Some(PickerAction::CursorLeft) => self.move_cursor_left(),
                         Some(PickerAction::CursorRight) => self.move_cursor_right(),
                         Some(PickerAction::MoveToLineStart) => self.move_to_start(),
@@ -220,6 +224,9 @@ impl<'a> Picker<'a> {
         }
         let layout = Layout::new(Direction::Vertical, [top_constraint, bottom_constraint])
             .split(preview_split[picker_pane]);
+
+        // Update page size based on the list area height
+        self.page_size = layout[list_index].height.saturating_sub(1).max(1) as usize;
 
         let snapshot = self.matcher.snapshot();
         let matches = snapshot
@@ -353,6 +360,54 @@ impl<'a> Picker<'a> {
                 self.selection.select(Some(item_count - 1))
             }
             Some(i) => self.selection.select(Some(i - 1)),
+            None => self.selection.select(Some(0)),
+        }
+    }
+
+    fn page_up(&mut self) {
+        if self.input_position == InputPosition::Bottom {
+            self.do_page_up()
+        } else {
+            self.do_page_down()
+        }
+    }
+
+    fn page_down(&mut self) {
+        if self.input_position == InputPosition::Bottom {
+            self.do_page_down()
+        } else {
+            self.do_page_up()
+        }
+    }
+
+    fn do_page_up(&mut self) {
+        let item_count = self.matcher.snapshot().matched_item_count() as usize;
+        if item_count == 0 {
+            return;
+        }
+
+        let max = item_count - 1;
+
+        match self.selection.selected() {
+            Some(i) => {
+                let new_index = i.saturating_add(self.page_size).min(max);
+                self.selection.select(Some(new_index));
+            }
+            None => self.selection.select(Some(0)),
+        }
+    }
+
+    fn do_page_down(&mut self) {
+        let item_count = self.matcher.snapshot().matched_item_count() as usize;
+        if item_count == 0 {
+            return;
+        }
+
+        match self.selection.selected() {
+            Some(i) => {
+                let new_index = i.saturating_sub(self.page_size);
+                self.selection.select(Some(new_index));
+            }
             None => self.selection.select(Some(0)),
         }
     }
