@@ -66,10 +66,22 @@ mod tests {
 
     #[test]
     fn test_normalize_path_removes_duplicate_slashes() {
-        assert_eq!(normalize_path("//home/user/git/repo"), "/home/user/git/repo");
-        assert_eq!(normalize_path("/home//user/git/repo"), "/home/user/git/repo");
-        assert_eq!(normalize_path("/home/user//git//repo"), "/home/user/git/repo");
-        assert_eq!(normalize_path("///home/user/git/repo"), "/home/user/git/repo");
+        assert_eq!(
+            normalize_path("//home/user/git/repo"),
+            "/home/user/git/repo"
+        );
+        assert_eq!(
+            normalize_path("/home//user/git/repo"),
+            "/home/user/git/repo"
+        );
+        assert_eq!(
+            normalize_path("/home/user//git//repo"),
+            "/home/user/git/repo"
+        );
+        assert_eq!(
+            normalize_path("///home/user/git/repo"),
+            "/home/user/git/repo"
+        );
     }
 
     #[test]
@@ -84,4 +96,3 @@ mod tests {
         assert_eq!(normalize_path("./git/repo"), "./git/repo");
     }
 }
-

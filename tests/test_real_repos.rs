@@ -6,10 +6,8 @@ use tms::repos::find_repos;
 #[test]
 fn test_async_repo_scanning_real() {
     // Check if git is available
-    let git_check = std::process::Command::new("git")
-        .arg("--version")
-        .output();
-    
+    let git_check = std::process::Command::new("git").arg("--version").output();
+
     if git_check.is_err() {
         eprintln!("Skipping test: git command not available");
         return;
@@ -43,11 +41,15 @@ fn test_async_repo_scanning_real() {
             .arg("init")
             .current_dir(repo_path)
             .output();
-        
+
         match output {
             Ok(out) => {
                 if !out.status.success() {
-                    eprintln!("Git init failed at {:?}: {}", repo_path, String::from_utf8_lossy(&out.stderr));
+                    eprintln!(
+                        "Git init failed at {:?}: {}",
+                        repo_path,
+                        String::from_utf8_lossy(&out.stderr)
+                    );
                     eprintln!("Skipping test due to git init failure");
                     return;
                 }
@@ -68,10 +70,14 @@ fn test_async_repo_scanning_real() {
 
     // Run the async repo finder
     let result = find_repos(&config);
-    assert!(result.is_ok(), "find_repos should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "find_repos should succeed: {:?}",
+        result.err()
+    );
 
     let repos = result.unwrap();
-    
+
     // We should find all 3 repositories
     assert_eq!(
         repos.len(),

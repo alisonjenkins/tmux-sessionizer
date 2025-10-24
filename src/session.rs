@@ -237,6 +237,7 @@ fn append_bookmarks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn verify_session_name_deduplication() {
@@ -260,5 +261,42 @@ mod tests {
         assert_eq!(deduplicated[0].name, "projects/proj2/test");
         assert_eq!(deduplicated[1].name, "to/proj2/test");
         assert_eq!(deduplicated[2].name, "to/proj1/test");
+    }
+
+    #[test]
+    fn verify_btreemap_maintains_alphabetical_order() {
+        let mut sessions: BTreeMap<String, Session> = BTreeMap::new();
+
+        // Insert sessions in non-alphabetical order
+        sessions.insert(
+            "zebra".to_string(),
+            Session::new("zebra".into(), SessionType::Bookmark("/path/zebra".into())),
+        );
+        sessions.insert(
+            "apple".to_string(),
+            Session::new("apple".into(), SessionType::Bookmark("/path/apple".into())),
+        );
+        sessions.insert(
+            "middle".to_string(),
+            Session::new(
+                "middle".into(),
+                SessionType::Bookmark("/path/middle".into()),
+            ),
+        );
+        sessions.insert(
+            "banana".to_string(),
+            Session::new(
+                "banana".into(),
+                SessionType::Bookmark("/path/banana".into()),
+            ),
+        );
+
+        // Verify list() returns them in alphabetical order
+        let list = sessions.list();
+        assert_eq!(list, vec!["apple", "banana", "middle", "zebra"]);
+
+        // Verify keys are iterated in sorted order
+        let keys: Vec<_> = sessions.keys().cloned().collect();
+        assert_eq!(keys, vec!["apple", "banana", "middle", "zebra"]);
     }
 }
