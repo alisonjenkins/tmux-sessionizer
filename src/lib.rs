@@ -11,6 +11,7 @@ pub mod tmux;
 
 use configs::Config;
 use std::process;
+use tokio::sync::mpsc;
 
 use crate::{
     error::{Result, TmsError},
@@ -38,6 +39,25 @@ pub fn get_single_selection(
         config.shortcuts.as_ref(),
         config.input_position.unwrap_or_default(),
         tmux,
+    )
+    .set_colors(config.picker_colors.as_ref());
+
+    picker.run()
+}
+
+/// Streaming version that shows a picker and starts scanning in the background
+pub fn get_single_selection_streaming(
+    preview: Option<Preview>,
+    config: &Config,
+    tmux: &Tmux,
+    receiver: mpsc::UnboundedReceiver<String>,
+) -> Result<Option<String>> {
+    let mut picker = Picker::new_streaming(
+        preview,
+        config.shortcuts.as_ref(),
+        config.input_position.unwrap_or_default(),
+        tmux,
+        receiver,
     )
     .set_colors(config.picker_colors.as_ref());
 

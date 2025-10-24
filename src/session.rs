@@ -4,12 +4,13 @@ use std::{
 };
 
 use error_stack::ResultExt;
+use tokio::sync::mpsc;
 
 use crate::{
     configs::Config,
     dirty_paths::DirtyUtf8Path,
     error::TmsError,
-    repos::{find_repos, find_submodules, RepoProvider},
+    repos::{find_repos, find_repos_streaming, find_submodules, RepoProvider},
     tmux::Tmux,
     Result,
 };
@@ -114,6 +115,67 @@ pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
     let sessions = generate_session_container(sessions, config)?;
 
     Ok(sessions)
+}
+
+/// Create a streaming session channel that yields sessions as repositories are found
+pub async fn create_sessions_streaming(config: &Config) -> Result<mpsc::UnboundedReceiver<String>> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (session_tx, session_rx) = mpsc::unbounded_channel();
+    
+    let config_clone = config.clone();
+    
+    // Start background repository scanning
+    tokio::spawn(async move {
+        if let Err(e) = find_repos_streaming(&config_clone, session_tx).await {
+            // Only log streaming errors when explicitly requested (defaults to suppressed)
+            if std::env::var("TMS_TRACE").unwrap_or_default() == "1" 
+                || std::env::var("TMS_DEBUG").unwrap_or_default() == "1" 
+                || std::env::var("TMS_NON_INTERACTIVE").unwrap_or_default() == "1" {
+                eprintln!("[TRACE] Error in streaming repo scan: {}", e);
+            }
+        }
+    });
+
+    // Process sessions and bookmarks
+    let bookmarks = config.bookmark_paths();
+    
+    // Send bookmarks first (they're instantly available)
+    for bookmark_path in bookmarks {
+        let bookmark_name = bookmark_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+            
+        let visible_name = if config.display_full_path == Some(true) {
+            bookmark_path.display().to_string()
+        } else {
+            bookmark_name
+        };
+        
+        if tx.send(visible_name).is_err() {
+            break; // Receiver was dropped
+        }
+    }
+    
+    let config_clone = config.clone();
+    // Process streaming repository sessions
+    tokio::spawn(async move {
+        let mut session_rx = session_rx;
+        while let Some(session) = session_rx.recv().await {
+            let visible_name = if config_clone.display_full_path == Some(true) {
+                session.path().display().to_string()
+            } else {
+                session.name.clone()
+            };
+            
+            if tx.send(visible_name).is_err() {
+                break; // Receiver was dropped
+            }
+        }
+    });
+    
+    Ok(rx)
 }
 
 fn generate_session_container(

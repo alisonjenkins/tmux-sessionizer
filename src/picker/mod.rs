@@ -19,6 +19,7 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::{
     configs::PickerColorConfig,
@@ -43,9 +44,7 @@ pub enum InputPosition {
 pub struct Picker<'a> {
     matcher: Nucleo<String>,
     preview: Option<Preview>,
-
     colors: Option<&'a PickerColorConfig>,
-
     selection: ListState,
     filter: String,
     cursor_pos: u16,
@@ -53,6 +52,8 @@ pub struct Picker<'a> {
     input_position: InputPosition,
     tmux: &'a Tmux,
     page_size: usize,
+    receiver: Option<mpsc::UnboundedReceiver<String>>,
+    total_items_added: usize,
 }
 
 impl<'a> Picker<'a> {
@@ -88,6 +89,40 @@ impl<'a> Picker<'a> {
             input_position,
             tmux,
             page_size: 10, // Default page size, will be updated during render
+            receiver: None,
+            total_items_added: list.len(),
+        }
+    }
+
+    /// Create a new streaming picker that starts empty and receives items via channel
+    pub fn new_streaming(
+        preview: Option<Preview>,
+        keymap: Option<&Keymap>,
+        input_position: InputPosition,
+        tmux: &'a Tmux,
+        receiver: mpsc::UnboundedReceiver<String>,
+    ) -> Self {
+        let matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+
+        let keymap = if let Some(keymap) = keymap {
+            Keymap::with_defaults(keymap)
+        } else {
+            Keymap::default()
+        };
+
+        Picker {
+            matcher,
+            preview,
+            colors: None,
+            selection: ListState::default(),
+            filter: String::default(),
+            cursor_pos: 0,
+            keymap,
+            input_position,
+            tmux,
+            page_size: 10,
+            receiver: Some(receiver),
+            total_items_added: 0,
         }
     }
 
@@ -98,6 +133,15 @@ impl<'a> Picker<'a> {
     }
 
     pub fn run(&mut self) -> Result<Option<String>> {
+        // Handle cases where no TTY is available (like in Nix sandbox or CI)
+        // We need to check for TTY availability before initializing ratatui
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            return Err(TmsError::TuiError(
+                "Cannot initialize terminal (no TTY available). This may indicate a configuration error or test environment.".to_string()
+            ).into());
+        }
+
         let mut terminal = ratatui::init();
 
         let selected_str = self
@@ -112,40 +156,66 @@ impl<'a> Picker<'a> {
     fn main_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
         loop {
             self.matcher.tick(1000);
+            
+            // Check for new streaming items
+            if let Some(ref mut receiver) = self.receiver {
+                // Process all available items without blocking
+                while let Ok(item) = receiver.try_recv() {
+                    let injector = self.matcher.injector();
+                    injector.push(item.clone(), |_, dst| dst[0] = item.into());
+                    self.total_items_added += 1;
+                }
+            }
+            
             self.update_selection();
             terminal
                 .draw(|f| self.render(f))
                 .map_err(|e| TmsError::TuiError(e.to_string()))?;
 
-            if let Event::Key(key) = event::read().map_err(|e| TmsError::TuiError(e.to_string()))? {
-                if key.kind == KeyEventKind::Press {
-                    match self.keymap.0.get(&key.into()) {
-                        Some(PickerAction::Cancel) => return Ok(None),
-                        Some(PickerAction::Confirm) => {
-                            if let Some(selected) = self.get_selected() {
-                                return Ok(Some(selected.to_owned()));
-                            }
-                        }
-                        Some(PickerAction::Backspace) => self.remove_filter(),
-                        Some(PickerAction::Delete) => self.delete(),
-                        Some(PickerAction::DeleteWord) => self.delete_word(),
-                        Some(PickerAction::DeleteToLineStart) => self.delete_to_line(false),
-                        Some(PickerAction::DeleteToLineEnd) => self.delete_to_line(true),
-                        Some(PickerAction::MoveUp) => self.move_up(),
-                        Some(PickerAction::MoveDown) => self.move_down(),
-                        Some(PickerAction::PageUp) => self.page_up(),
-                        Some(PickerAction::PageDown) => self.page_down(),
-                        Some(PickerAction::CursorLeft) => self.move_cursor_left(),
-                        Some(PickerAction::CursorRight) => self.move_cursor_right(),
-                        Some(PickerAction::MoveToLineStart) => self.move_to_start(),
-                        Some(PickerAction::MoveToLineEnd) => self.move_to_end(),
-                        Some(PickerAction::Noop) => {}
-                        None => {
-                            if let KeyCode::Char(c) = key.code {
-                                self.update_filter(c)
+            // Use a shorter timeout for better responsiveness during streaming
+            let timeout = if self.receiver.is_some() { 
+                std::time::Duration::from_millis(50) // 50ms for streaming
+            } else { 
+                std::time::Duration::from_millis(100) // 100ms for static
+            };
+
+            match crossterm::event::poll(timeout).map_err(|e| TmsError::TuiError(e.to_string()))? {
+                true => {
+                    if let Event::Key(key) = event::read().map_err(|e| TmsError::TuiError(e.to_string()))? {
+                        if key.kind == KeyEventKind::Press {
+                            match self.keymap.0.get(&key.into()) {
+                                Some(PickerAction::Cancel) => return Ok(None),
+                                Some(PickerAction::Confirm) => {
+                                    if let Some(selected) = self.get_selected() {
+                                        return Ok(Some(selected.to_owned()));
+                                    }
+                                }
+                                Some(PickerAction::Backspace) => self.remove_filter(),
+                                Some(PickerAction::Delete) => self.delete(),
+                                Some(PickerAction::DeleteWord) => self.delete_word(),
+                                Some(PickerAction::DeleteToLineStart) => self.delete_to_line(false),
+                                Some(PickerAction::DeleteToLineEnd) => self.delete_to_line(true),
+                                Some(PickerAction::MoveUp) => self.move_up(),
+                                Some(PickerAction::MoveDown) => self.move_down(),
+                                Some(PickerAction::PageUp) => self.page_up(),
+                                Some(PickerAction::PageDown) => self.page_down(),
+                                Some(PickerAction::CursorLeft) => self.move_cursor_left(),
+                                Some(PickerAction::CursorRight) => self.move_cursor_right(),
+                                Some(PickerAction::MoveToLineStart) => self.move_to_start(),
+                                Some(PickerAction::MoveToLineEnd) => self.move_to_end(),
+                                Some(PickerAction::Noop) => {}
+                                None => {
+                                    if let KeyCode::Char(c) = key.code {
+                                        self.update_filter(c)
+                                    }
+                                }
                             }
                         }
                     }
+                }
+                false => {
+                    // No input available, continue the loop to check for streaming items
+                    continue;
                 }
             }
         }
@@ -250,11 +320,19 @@ impl<'a> Picker<'a> {
                     .border_style(Style::default().fg(colors.border_color()))
                     .title_style(Style::default().fg(colors.info_color()))
                     .title_position(title_position)
-                    .title(format!(
-                        "{}/{}",
-                        snapshot.matched_item_count(),
-                        snapshot.item_count()
-                    )),
+                    .title(if self.receiver.is_some() {
+                        format!(
+                            "🔍 {}/{} (scanning...)",
+                            snapshot.matched_item_count(),
+                            snapshot.item_count()
+                        )
+                    } else {
+                        format!(
+                            "{}/{}",
+                            snapshot.matched_item_count(),
+                            snapshot.item_count()
+                        )
+                    }),
             );
         f.render_stateful_widget(table, layout[list_index], &mut self.selection);
 
