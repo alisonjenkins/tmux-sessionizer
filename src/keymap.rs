@@ -319,6 +319,34 @@ impl Default for Keymap {
                 },
                 PickerAction::MoveToLineEnd,
             ),
+            (
+                Key {
+                    code: KeyCode::PageUp,
+                    modifiers: KeyModifiers::empty(),
+                },
+                PickerAction::PageUp,
+            ),
+            (
+                Key {
+                    code: KeyCode::PageDown,
+                    modifiers: KeyModifiers::empty(),
+                },
+                PickerAction::PageDown,
+            ),
+            (
+                Key {
+                    code: KeyCode::Char('f'),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                PickerAction::PageDown,
+            ),
+            (
+                Key {
+                    code: KeyCode::Char('b'),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                PickerAction::PageUp,
+            ),
         ]))
     }
 }
@@ -349,6 +377,10 @@ pub enum PickerAction {
     MoveUp,
     #[serde(rename = "move_down")]
     MoveDown,
+    #[serde(rename = "page_up")]
+    PageUp,
+    #[serde(rename = "page_down")]
+    PageDown,
     #[serde(rename = "cursor_left")]
     CursorLeft,
     #[serde(rename = "cursor_right")]
