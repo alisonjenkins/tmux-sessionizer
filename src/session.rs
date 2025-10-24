@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -92,7 +92,7 @@ pub trait SessionContainer {
     fn list(&self) -> Vec<String>;
 }
 
-impl SessionContainer for HashMap<String, Session> {
+impl SessionContainer for BTreeMap<String, Session> {
     fn find_session(&self, name: &str) -> Option<&Session> {
         self.get(name)
     }
@@ -102,10 +102,8 @@ impl SessionContainer for HashMap<String, Session> {
     }
 
     fn list(&self) -> Vec<String> {
-        let mut list: Vec<String> = self.keys().map(|s| s.to_owned()).collect();
-        list.sort();
-
-        list
+        // BTreeMap keys are already sorted, so we can just collect them
+        self.keys().map(|s| s.to_owned()).collect()
     }
 }
 
@@ -119,10 +117,10 @@ pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
 }
 
 fn generate_session_container(
-    mut sessions: HashMap<String, Vec<Session>>,
+    mut sessions: BTreeMap<String, Vec<Session>>,
     config: &Config,
 ) -> Result<impl SessionContainer> {
-    let mut ret = HashMap::new();
+    let mut ret = BTreeMap::new();
 
     for list in sessions.values_mut() {
         if list.len() == 1 {
@@ -216,8 +214,8 @@ fn deduplicate_sessions(duplicate_sessions: &mut Vec<Session>) -> Vec<Session> {
 
 fn append_bookmarks(
     config: &Config,
-    mut sessions: HashMap<String, Vec<Session>>,
-) -> Result<HashMap<String, Vec<Session>>> {
+    mut sessions: BTreeMap<String, Vec<Session>>,
+) -> Result<BTreeMap<String, Vec<Session>>> {
     let bookmarks = config.bookmark_paths();
 
     for path in bookmarks {

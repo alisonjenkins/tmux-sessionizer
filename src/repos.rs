@@ -10,7 +10,7 @@ use jj_lib::{
     workspace::{WorkingCopyFactories, Workspace},
 };
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::{self, Stdio},
     sync::{Arc, Mutex},
@@ -293,8 +293,8 @@ impl RepoProvider {
     }
 }
 
-pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
-    let repos: Arc<Mutex<HashMap<String, Vec<Session>>>> = Arc::new(Mutex::new(HashMap::new()));
+pub fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
+    let repos: Arc<Mutex<BTreeMap<String, Vec<Session>>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
     search_dirs(config, |file, repo| {
         if repo.is_worktree() {
