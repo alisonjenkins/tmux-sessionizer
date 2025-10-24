@@ -60,13 +60,13 @@ impl Worktree for Workspace {
 }
 
 pub enum RepoProvider {
-    Git(Repository),
+    Git(Box<Repository>),
     Jujutsu(Workspace),
 }
 
 impl From<gix::Repository> for RepoProvider {
     fn from(repo: gix::Repository) -> Self {
-        Self::Git(repo)
+        Self::Git(Box::new(repo))
     }
 }
 
@@ -74,7 +74,7 @@ impl RepoProvider {
     pub fn open(path: &Path, config: &Config) -> Result<Self> {
         fn open_git(path: &Path) -> Result<RepoProvider> {
             gix::open(path)
-                .map(RepoProvider::Git)
+                .map(|repo| RepoProvider::Git(Box::new(repo)))
                 .change_context(TmsError::GitError)
         }
 
@@ -125,7 +125,7 @@ impl RepoProvider {
 
     pub fn is_worktree(&self) -> bool {
         match self {
-            RepoProvider::Git(repo) => !repo.main_repo().is_ok_and(|r| r == *repo),
+            RepoProvider::Git(repo) => !repo.main_repo().is_ok_and(|r| r == **repo),
             RepoProvider::Jujutsu(repo) => {
                 let repo_path = repo.repo_path();
                 let workspace_repo_path = repo.workspace_root().join(".jj/repo");
@@ -309,7 +309,7 @@ pub fn find_repos(config: &Config) -> Result<HashMap<String, Vec<Session>>> {
             })?
             .to_string()?;
 
-        let session = Session::new(session_name, SessionType::Git(repo));
+        let session = Session::new(session_name, SessionType::Git(Box::new(repo)));
         let mut repos = repos.lock().map_err(|_| TmsError::IoError).change_context(TmsError::IoError)?;
         if let Some(list) = repos.get_mut(&session.name) {
             list.push(session);
@@ -494,7 +494,7 @@ pub fn find_submodules<'a>(
                 find_submodules(submodules, &name, repos, config)?;
             }
         }
-        let session = Session::new(session_name, SessionType::Git(repo.into()));
+        let session = Session::new(session_name, SessionType::Git(Box::new(repo.into())));
         repos.insert_session(name, session);
     }
     Ok(())
