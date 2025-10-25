@@ -27,8 +27,8 @@ fn create_mock_git_repo(path: &std::path::Path) {
         .expect("Failed to create config");
 }
 
-#[test]
-fn real_world_benchmark() {
+#[tokio::test]
+async fn real_world_benchmark() {
     // Create a realistic directory structure similar to a developer's workspace
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -84,11 +84,11 @@ fn real_world_benchmark() {
     };
     
     // Warm up run (to account for filesystem caching)
-    let _ = find_repos(&config);
+    let _ = find_repos(&config).await;
     
     // Actual performance benchmark
     let benchmark_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = benchmark_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");
@@ -100,8 +100,8 @@ fn real_world_benchmark() {
     assert!(scan_duration.as_millis() < 2000, "Scan should complete in under 2000ms for realistic workspace, took {:?}", scan_duration);
 }
 
-#[test]  
-fn benchmark_large_monorepo_structure() {
+#[tokio::test]  
+async fn benchmark_large_monorepo_structure() {
     // Simulate a large monorepo with many nested directories but few actual repos
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -142,7 +142,7 @@ fn benchmark_large_monorepo_structure() {
     };
     
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");
@@ -154,8 +154,8 @@ fn benchmark_large_monorepo_structure() {
     assert!(scan_duration.as_millis() < 1000, "Large monorepo scan should complete in under 1000ms, took {:?}", scan_duration);
 }
 
-#[test]
-fn benchmark_performance_with_exclusions() {
+#[tokio::test]
+async fn benchmark_performance_with_exclusions() {
     // Test performance with common build directories that should be excluded
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -191,7 +191,7 @@ fn benchmark_performance_with_exclusions() {
     };
     
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");

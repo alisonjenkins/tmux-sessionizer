@@ -10,10 +10,10 @@ use nucleo::{
 use preview::PreviewWidget;
 use ratatui::{
     layout::{self, Constraint, Direction, Layout},
-    style::Style,
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{
-        block::Position, Block, Borders, HighlightSpacing, List, ListDirection, ListItem,
+        block::Position, Block, Borders, Clear, HighlightSpacing, List, ListDirection, ListItem,
         ListState, Paragraph,
     },
     DefaultTerminal, Frame,
@@ -59,6 +59,32 @@ impl PickerMode {
     }
 }
 
+/// UI state for the picker
+#[derive(Debug, Clone, PartialEq)]
+enum UIState {
+    /// Normal picker operation
+    Normal,
+    /// Mode selection overlay
+    ModeSelection {
+        selection: usize,
+        filter: String,
+        cursor_pos: usize,
+    },
+    /// Loading state with progress message
+    Loading(String),
+    /// Error display
+    Error(String),
+}
+
+/// Background operation status
+#[derive(Debug, Clone)]
+enum BackgroundOp {
+    None,
+    LoadingLocal,
+    LoadingGitHub(String),
+    RefreshingCurrent,
+}
+
 pub struct Picker<'a> {
     matcher: Nucleo<String>,
     preview: Option<Preview>,
@@ -78,6 +104,26 @@ pub struct Picker<'a> {
     github_client: Option<GitHubClient>,
     state_manager: Option<StateManager>,
     config: &'a Config,
+    // UI State management
+    ui_state: UIState,
+    background_op: BackgroundOp,
+    // Error/message display
+    status_message: Option<String>,
+    error_message: Option<String>,
+}
+
+fn create_available_modes(config: &Config) -> Vec<PickerMode> {
+    let mut available_modes = vec![PickerMode::Local];
+    
+    // Add GitHub profiles as modes (deduplicate by name to prevent duplicate modes)
+    let mut seen_profile_names = std::collections::HashSet::new();
+    for profile in config.get_github_profiles() {
+        if seen_profile_names.insert(profile.name.clone()) {
+            available_modes.push(PickerMode::GitHub(profile.name));
+        }
+    }
+    
+    available_modes
 }
 
 impl<'a> Picker<'a> {
@@ -104,12 +150,7 @@ impl<'a> Picker<'a> {
         };
 
         // Setup available modes
-        let mut available_modes = vec![PickerMode::Local];
-        
-        // Add GitHub profiles as modes
-        for profile in config.get_github_profiles() {
-            available_modes.push(PickerMode::GitHub(profile.name));
-        }
+        let available_modes = create_available_modes(config);
 
         // Determine initial mode based on saved active profile
         let (current_mode, state_manager) = if let Ok(state_manager) = StateManager::new() {
@@ -154,6 +195,10 @@ impl<'a> Picker<'a> {
             github_client,
             state_manager,
             config,
+            ui_state: UIState::Normal,
+            background_op: BackgroundOp::None,
+            status_message: None,
+            error_message: None,
         }
     }
 
@@ -175,12 +220,7 @@ impl<'a> Picker<'a> {
         };
 
         // Setup available modes
-        let mut available_modes = vec![PickerMode::Local];
-        
-        // Add GitHub profiles as modes
-        for profile in config.get_github_profiles() {
-            available_modes.push(PickerMode::GitHub(profile.name));
-        }
+        let available_modes = create_available_modes(config);
 
         // Determine initial mode based on saved active profile
         let (current_mode, state_manager) = if let Ok(state_manager) = StateManager::new() {
@@ -225,6 +265,10 @@ impl<'a> Picker<'a> {
             github_client,
             state_manager,
             config,
+            ui_state: UIState::Normal,
+            background_op: BackgroundOp::None,
+            status_message: None,
+            error_message: None,
         }
     }
 
@@ -259,10 +303,9 @@ impl<'a> Picker<'a> {
     async fn async_main_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
         // Load initial data for the current mode if it's a GitHub profile
         if matches!(self.current_mode, PickerMode::GitHub(_)) {
-            if let Err(e) = self.load_github_mode_data(false).await {
-                eprintln!("Warning: Error loading initial GitHub repositories: {}", e);
-            }
+            self.start_loading_github_mode(false).await;
         }
+
         loop {
             self.matcher.tick(1000);
             
@@ -277,112 +320,150 @@ impl<'a> Picker<'a> {
             }
             
             self.update_selection();
+            
+            // Check for background operation completion
+            self.check_background_operations().await;
+            
             terminal
-                .draw(|f| self.render(f))
+                .draw(|f| self.render_with_overlays(f))
                 .map_err(|e| TmsError::TuiError(e.to_string()))?;
 
-            // Use a shorter timeout for better responsiveness during streaming
-            let timeout = if self.receiver.is_some() { 
-                std::time::Duration::from_millis(50) // 50ms for streaming
-            } else { 
-                std::time::Duration::from_millis(100) // 100ms for static
-            };
+            // Use a shorter timeout for better responsiveness
+            let timeout = std::time::Duration::from_millis(50);
 
             match crossterm::event::poll(timeout).map_err(|e| TmsError::TuiError(e.to_string()))? {
                 true => {
                     if let Event::Key(key) = event::read().map_err(|e| TmsError::TuiError(e.to_string()))? {
                         if key.kind == KeyEventKind::Press {
-                            // Check for mode switching key
-                            let switch_key = &self.config.get_picker_switch_mode_key();
-                            let refresh_key = &self.config.get_picker_refresh_key();
-                            
-                            if key.code == KeyCode::Tab && switch_key == "tab" {
-                                // Show mode selection picker
-                                if let Some(selected_mode) = self.show_mode_picker().await? {
-                                    if selected_mode != self.current_mode {
-                                        self.current_mode = selected_mode;
-                                        self.clear_and_save_mode();
-                                        // Load data for the new mode
-                                        match &self.current_mode {
-                                            PickerMode::Local => {
-                                                if let Err(e) = self.load_local_mode_data(false).await {
-                                                    eprintln!("Error loading local repositories: {}", e);
-                                                }
-                                            }
-                                            PickerMode::GitHub(_) => {
-                                                if let Err(e) = self.load_github_mode_data(false).await {
-                                                    eprintln!("Error loading GitHub repositories: {}", e);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                continue;
-                            } else if key.code == KeyCode::F(5) && refresh_key == "f5" {
-                                self.refresh_current_mode().await?;
-                                continue;
-                            }
-                            
-                            match self.keymap.0.get(&key.into()) {
-                                Some(PickerAction::Cancel) => return Ok(None),
-                                Some(PickerAction::Confirm) => {
-                                    if let Some(selected) = self.get_selected() {
-                                        let selected = selected.to_owned();
-                                        return self.handle_selection(&selected).await;
-                                    }
-                                }
-                                Some(PickerAction::SwitchMode) => {
-                                    // Show mode selection picker
-                                    if let Some(selected_mode) = self.show_mode_picker().await? {
-                                        if selected_mode != self.current_mode {
-                                            self.current_mode = selected_mode;
-                                            self.clear_and_save_mode();
-                                            // Load data for the new mode
-                                            match &self.current_mode {
-                                                PickerMode::Local => {
-                                                    if let Err(e) = self.load_local_mode_data(false).await {
-                                                        eprintln!("Error loading local repositories: {}", e);
-                                                    }
-                                                }
-                                                PickerMode::GitHub(_) => {
-                                                    if let Err(e) = self.load_github_mode_data(false).await {
-                                                        eprintln!("Error loading GitHub repositories: {}", e);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Some(PickerAction::Refresh) => {
-                                    self.refresh_current_mode().await?;
-                                }
-                                Some(PickerAction::Backspace) => self.remove_filter(),
-                                Some(PickerAction::Delete) => self.delete(),
-                                Some(PickerAction::DeleteWord) => self.delete_word(),
-                                Some(PickerAction::DeleteToLineStart) => self.delete_to_line(false),
-                                Some(PickerAction::DeleteToLineEnd) => self.delete_to_line(true),
-                                Some(PickerAction::MoveUp) => self.move_up(),
-                                Some(PickerAction::MoveDown) => self.move_down(),
-                                Some(PickerAction::PageUp) => self.page_up(),
-                                Some(PickerAction::PageDown) => self.page_down(),
-                                Some(PickerAction::CursorLeft) => self.move_cursor_left(),
-                                Some(PickerAction::CursorRight) => self.move_cursor_right(),
-                                Some(PickerAction::MoveToLineStart) => self.move_to_start(),
-                                Some(PickerAction::MoveToLineEnd) => self.move_to_end(),
-                                Some(PickerAction::Noop) => {}
-                                None => {
-                                    if let KeyCode::Char(c) = key.code {
-                                        self.update_filter(c)
-                                    }
-                                }
+                            if let Some(result) = self.handle_key_event(key).await? {
+                                return Ok(result);
                             }
                         }
                     }
                 }
                 false => {
-                    // No input available, continue the loop to check for streaming items
+                    // No input available, continue the loop
                     continue;
                 }
+            }
+        }
+    }
+
+    /// Handle key events based on current UI state
+    async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<Option<Option<String>>> {
+        match &self.ui_state {
+            UIState::Normal => self.handle_normal_key_event(key).await,
+            UIState::ModeSelection { .. } => {
+                self.handle_mode_selection_key_event(key).await;
+                Ok(None)
+            }
+            UIState::Loading(_) => {
+                // In loading state, only allow cancel
+                if matches!(self.keymap.0.get(&key.into()), Some(PickerAction::Cancel)) {
+                    Ok(Some(None))
+                } else {
+                    Ok(None)
+                }
+            }
+            UIState::Error(_) => {
+                // Any key dismisses error
+                self.ui_state = UIState::Normal;
+                self.error_message = None;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle key events in normal mode
+    async fn handle_normal_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<Option<Option<String>>> {
+        // Check for mode switching key
+        let switch_key = &self.config.get_picker_switch_mode_key();
+        let refresh_key = &self.config.get_picker_refresh_key();
+        
+        if key.code == KeyCode::Tab && switch_key == "tab" {
+            self.enter_mode_selection();
+            return Ok(None);
+        } else if key.code == KeyCode::F(5) && refresh_key == "f5" {
+            self.start_refresh_current_mode().await;
+            return Ok(None);
+        }
+        
+        match self.keymap.0.get(&key.into()) {
+            Some(PickerAction::Cancel) => Ok(Some(None)),
+            Some(PickerAction::Confirm) => {
+                if let Some(selected) = self.get_selected() {
+                    let selected = selected.to_owned();
+                    Ok(Some(self.handle_selection(&selected).await?))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(PickerAction::SwitchMode) => {
+                self.enter_mode_selection();
+                Ok(None)
+            }
+            Some(PickerAction::Refresh) => {
+                self.start_refresh_current_mode().await;
+                Ok(None)
+            }
+            Some(PickerAction::Backspace) => {
+                self.remove_filter();
+                Ok(None)
+            }
+            Some(PickerAction::Delete) => {
+                self.delete();
+                Ok(None)
+            }
+            Some(PickerAction::DeleteWord) => {
+                self.delete_word();
+                Ok(None)
+            }
+            Some(PickerAction::DeleteToLineStart) => {
+                self.delete_to_line(false);
+                Ok(None)
+            }
+            Some(PickerAction::DeleteToLineEnd) => {
+                self.delete_to_line(true);
+                Ok(None)
+            }
+            Some(PickerAction::MoveUp) => {
+                self.move_up();
+                Ok(None)
+            }
+            Some(PickerAction::MoveDown) => {
+                self.move_down();
+                Ok(None)
+            }
+            Some(PickerAction::PageUp) => {
+                self.page_up();
+                Ok(None)
+            }
+            Some(PickerAction::PageDown) => {
+                self.page_down();
+                Ok(None)
+            }
+            Some(PickerAction::CursorLeft) => {
+                self.move_cursor_left();
+                Ok(None)
+            }
+            Some(PickerAction::CursorRight) => {
+                self.move_cursor_right();
+                Ok(None)
+            }
+            Some(PickerAction::MoveToLineStart) => {
+                self.move_to_start();
+                Ok(None)
+            }
+            Some(PickerAction::MoveToLineEnd) => {
+                self.move_to_end();
+                Ok(None)
+            }
+            Some(PickerAction::Noop) => Ok(None),
+            None => {
+                if let KeyCode::Char(c) = key.code {
+                    self.update_filter(c);
+                }
+                Ok(None)
             }
         }
     }
@@ -522,6 +603,193 @@ impl<'a> Picker<'a> {
             );
             f.render_widget(preview, preview_split[preview_pane]);
         }
+    }
+
+    /// Render the picker with overlays based on UI state
+    fn render_with_overlays(&mut self, f: &mut Frame) {
+        // Always render the base picker
+        self.render(f);
+        
+        // Render overlays based on UI state
+        match &self.ui_state {
+            UIState::Normal => {
+                // Render status message if any
+                if let Some(ref message) = self.status_message {
+                    self.render_status_overlay(f, message);
+                }
+            }
+            UIState::ModeSelection { selection, filter, cursor_pos } => {
+                self.render_mode_selection_overlay(f, *selection, filter, *cursor_pos);
+            }
+            UIState::Loading(message) => {
+                self.render_loading_overlay(f, message);
+            }
+            UIState::Error(error) => {
+                self.render_error_overlay(f, error);
+            }
+        }
+    }
+
+    /// Render mode selection overlay
+    fn render_mode_selection_overlay(&self, f: &mut Frame, selection: usize, filter: &str, cursor_pos: usize) {
+        let area = f.area();
+        
+        // Create a centered popup
+        let popup_area = popup_area(area, 60, 70);
+        
+        // Clear the area
+        f.render_widget(Clear, popup_area);
+        
+        let colors = if let Some(colors) = self.colors {
+            colors.to_owned()
+        } else {
+            PickerColorConfig::default_colors()
+        };
+
+        // Filter modes based on filter text
+        let filtered_modes: Vec<(usize, &PickerMode)> = self.available_modes.iter().enumerate()
+            .filter(|(_, mode)| {
+                if filter.is_empty() {
+                    true
+                } else {
+                    mode.display_name().to_lowercase().contains(&filter.to_lowercase())
+                }
+            })
+            .collect();
+
+        // Find the current mode in filtered list for initial selection
+        let mut adjusted_selection = selection.min(filtered_modes.len().saturating_sub(1));
+        
+        // If no filter and selection is 0, try to find and select the current mode
+        if filter.is_empty() && selection == 0 {
+            if let Some(current_filtered_index) = filtered_modes.iter().position(|(_, mode)| *mode == &self.current_mode) {
+                adjusted_selection = current_filtered_index;
+            }
+        }
+
+        // Split area for list and input
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+            ])
+            .split(popup_area);
+
+        // Render mode list
+        let items: Vec<ListItem> = filtered_modes.iter()
+            .map(|(_, mode)| {
+                let display_name = mode.display_name();
+                if *mode == &self.current_mode {
+                    ListItem::new(format!("● {} (current)", display_name))
+                } else {
+                    ListItem::new(format!("  {}", display_name))
+                }
+            })
+            .collect();
+
+        let mut list_state = ListState::default();
+        if !filtered_modes.is_empty() && adjusted_selection < filtered_modes.len() {
+            list_state.select(Some(adjusted_selection));
+        }
+
+        let list = List::new(items)
+            .highlight_style(colors.highlight_style())
+            .highlight_symbol("> ")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(colors.border_color()))
+                    .title("Select Mode")
+                    .title_style(Style::default().fg(colors.info_color())),
+            );
+        f.render_stateful_widget(list, layout[0], &mut list_state);
+
+        // Render filter input
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(colors.border_color()))
+            .title("Filter");
+            
+        let input = Paragraph::new(filter)
+            .block(input_block)
+            .style(Style::default().fg(colors.prompt_color()));
+        f.render_widget(input, layout[1]);
+
+        // Set cursor position
+        if cursor_pos <= filter.len() {
+            f.set_cursor_position(layout::Position {
+                x: layout[1].x + cursor_pos as u16 + 1,
+                y: layout[1].y + 1,
+            });
+        }
+    }
+
+    /// Render loading overlay
+    fn render_loading_overlay(&self, f: &mut Frame, message: &str) {
+        let area = f.area();
+        let popup_area = popup_area(area, 50, 20);
+        
+        f.render_widget(Clear, popup_area);
+        
+        let colors = if let Some(colors) = self.colors {
+            colors.to_owned()
+        } else {
+            PickerColorConfig::default_colors()
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(colors.border_color()))
+            .title("Loading")
+            .title_style(Style::default().fg(colors.info_color()));
+            
+        let paragraph = Paragraph::new(message)
+            .block(block)
+            .style(Style::default().fg(colors.prompt_color()));
+        f.render_widget(paragraph, popup_area);
+    }
+
+    /// Render error overlay
+    fn render_error_overlay(&self, f: &mut Frame, error: &str) {
+        let area = f.area();
+        let popup_area = popup_area(area, 60, 30);
+        
+        f.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title("Error - Press any key to continue")
+            .title_style(Style::default().fg(Color::Red));
+            
+        let paragraph = Paragraph::new(error)
+            .block(block)
+            .style(Style::default().fg(Color::Red));
+        f.render_widget(paragraph, popup_area);
+    }
+
+    /// Render status overlay
+    fn render_status_overlay(&self, f: &mut Frame, message: &str) {
+        let area = f.area();
+        
+        // Render status at the bottom
+        let status_area = layout::Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        
+        let colors = if let Some(colors) = self.colors {
+            colors.to_owned()
+        } else {
+            PickerColorConfig::default_colors()
+        };
+
+        let status = Paragraph::new(message)
+            .style(Style::default().fg(colors.info_color()));
+        f.render_widget(status, status_area);
     }
 
     fn get_preview_text(&self) -> String {
@@ -774,189 +1042,161 @@ impl<'a> Picker<'a> {
         self.cursor_pos = u16::try_from(self.filter.len()).unwrap_or_default();
     }
 
-    /// Show a mode selection picker and return the selected mode
-    async fn show_mode_picker(&self) -> Result<Option<PickerMode>> {
+    /// Enter mode selection UI state
+    fn enter_mode_selection(&mut self) {
         if self.available_modes.len() <= 1 {
-            return Ok(None);
+            return;
         }
 
-        // Create mode display strings
-        let mode_strings: Vec<String> = self.available_modes.iter()
-            .map(|mode| mode.display_name())
-            .collect();
-
-        // Find current mode index for initial selection
-        let current_index = self.available_modes.iter()
-            .position(|mode| mode == &self.current_mode)
-            .unwrap_or(0);
-
-        // Create a simple mode selector using the same terminal
-        let selected_index = self.run_simple_picker(&mode_strings, current_index).await?;
-        
-        if let Some(index) = selected_index {
-            Ok(Some(self.available_modes[index].clone()))
-        } else {
-            Ok(None)
-        }
+        // Start with no selection initially, will be set correctly in rendering
+        self.ui_state = UIState::ModeSelection {
+            selection: 0,
+            filter: String::new(),
+            cursor_pos: 0,
+        };
     }
 
-    /// Run a simple picker for mode selection without recursion
-    async fn run_simple_picker(&self, items: &[String], initial_selection: usize) -> Result<Option<usize>> {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
-            return Err(TmsError::TuiError(
-                "Cannot initialize terminal (no TTY available)".to_string()
-            ).into());
-        }
-
-        let mut terminal = ratatui::init();
-        let result = self.simple_picker_loop(&mut terminal, items, initial_selection).await;
-        ratatui::restore();
-        
-        result.map_err(|e| TmsError::TuiError(e.to_string()).into())
-    }
-
-    /// Simple picker loop for mode selection
-    async fn simple_picker_loop(
-        &self,
-        terminal: &mut DefaultTerminal, 
-        items: &[String], 
-        initial_selection: usize
-    ) -> Result<Option<usize>> {
-        let mut selection = initial_selection.min(items.len().saturating_sub(1));
-        let mut filter = String::new();
-        let mut cursor_pos = 0u16;
-        
-        loop {
-            // Filter items based on current filter
-            let filtered_items: Vec<(usize, &String)> = items.iter().enumerate()
-                .filter(|(_, item)| {
+    /// Handle key events in mode selection state
+    async fn handle_mode_selection_key_event(&mut self, key: crossterm::event::KeyEvent) {
+        if let UIState::ModeSelection { selection, filter, cursor_pos } = &mut self.ui_state {
+            // Filter modes based on current filter text
+            let filtered_modes: Vec<(usize, &PickerMode)> = self.available_modes.iter().enumerate()
+                .filter(|(_, mode)| {
                     if filter.is_empty() {
                         true
                     } else {
-                        item.to_lowercase().contains(&filter.to_lowercase())
+                        mode.display_name().to_lowercase().contains(&filter.to_lowercase())
                     }
                 })
                 .collect();
-
-            // Update selection to be within filtered bounds
-            if selection >= filtered_items.len() && !filtered_items.is_empty() {
-                selection = filtered_items.len() - 1;
-            }
-
-            terminal.draw(|f| self.render_simple_picker(f, &filtered_items, selection, &filter, cursor_pos))
-                .map_err(|e| TmsError::TuiError(e.to_string()))?;
-
-            let timeout = std::time::Duration::from_millis(100);
-            match crossterm::event::poll(timeout).map_err(|e| TmsError::TuiError(e.to_string()))? {
-                true => {
-                    if let Event::Key(key) = event::read().map_err(|e| TmsError::TuiError(e.to_string()))? {
-                        if key.kind == KeyEventKind::Press {
-                            match key.code {
-                                KeyCode::Esc => return Ok(None),
-                                KeyCode::Enter => {
-                                    if !filtered_items.is_empty() && selection < filtered_items.len() {
-                                        return Ok(Some(filtered_items[selection].0));
-                                    }
-                                }
-                                KeyCode::Up => {
-                                    if !filtered_items.is_empty() {
-                                        selection = if selection == 0 { 
-                                            filtered_items.len() - 1 
-                                        } else { 
-                                            selection - 1 
-                                        };
-                                    }
-                                }
-                                KeyCode::Down => {
-                                    if !filtered_items.is_empty() {
-                                        selection = (selection + 1) % filtered_items.len();
-                                    }
-                                }
-                                KeyCode::Char(c) => {
-                                    filter.insert(cursor_pos as usize, c);
-                                    cursor_pos += 1;
-                                    selection = 0; // Reset selection when filtering
-                                }
-                                KeyCode::Backspace => {
-                                    if cursor_pos > 0 {
-                                        filter.remove(cursor_pos as usize - 1);
-                                        cursor_pos -= 1;
-                                        selection = 0; // Reset selection when filtering
-                                    }
-                                }
-                                _ => {}
-                            }
+            
+            match key.code {
+                KeyCode::Esc => {
+                    self.ui_state = UIState::Normal;
+                }
+                KeyCode::Enter => {
+                    if *selection < filtered_modes.len() {
+                        let (original_index, _) = filtered_modes[*selection];
+                        let selected_mode = self.available_modes[original_index].clone();
+                        if selected_mode != self.current_mode {
+                            self.switch_to_mode(selected_mode).await;
                         }
                     }
+                    self.ui_state = UIState::Normal;
                 }
-                false => continue,
+                KeyCode::Up => {
+                    if !filtered_modes.is_empty() {
+                        *selection = if *selection == 0 {
+                            filtered_modes.len() - 1
+                        } else {
+                            *selection - 1
+                        };
+                    }
+                }
+                KeyCode::Down => {
+                    if !filtered_modes.is_empty() {
+                        *selection = (*selection + 1) % filtered_modes.len();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    filter.insert(*cursor_pos, c);
+                    *cursor_pos += 1;
+                    *selection = 0; // Reset selection when filtering
+                }
+                KeyCode::Backspace => {
+                    if *cursor_pos > 0 {
+                        filter.remove(*cursor_pos - 1);
+                        *cursor_pos -= 1;
+                        *selection = 0; // Reset selection when filtering
+                    }
+                }
+                _ => {}
             }
         }
     }
 
-    /// Render the simple mode picker
-    fn render_simple_picker(
-        &self,
-        f: &mut Frame,
-        filtered_items: &[(usize, &String)],
-        selection: usize,
-        filter: &str,
-        cursor_pos: u16,
-    ) {
-        use ratatui::{
-            layout::{Constraint, Direction, Layout, Position},
-            style::Style,
-            text::{Line, Span},
-            widgets::{Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState, Paragraph},
-        };
-
-        let area = f.area();
-        let layout = Layout::new(
-            Direction::Vertical,
-            [Constraint::Length(area.height.saturating_sub(1)), Constraint::Length(1)]
-        ).split(area);
-
-        let colors = if let Some(colors) = self.colors {
-            colors.to_owned()
-        } else {
-            PickerColorConfig::default_colors()
-        };
-
-        // Render the list
-        let items: Vec<ListItem> = filtered_items.iter()
-            .map(|(_, item)| ListItem::new(item.as_str()))
-            .collect();
-
-        let mut list_state = ListState::default();
-        if !filtered_items.is_empty() && selection < filtered_items.len() {
-            list_state.select(Some(selection));
+    /// Switch to a new mode
+    async fn switch_to_mode(&mut self, new_mode: PickerMode) {
+        self.current_mode = new_mode.clone();
+        self.clear_and_save_mode();
+        
+        match &new_mode {
+            PickerMode::Local => {
+                self.start_loading_local_mode(false).await;
+            }
+            PickerMode::GitHub(_) => {
+                self.start_loading_github_mode(false).await;
+            }
         }
+    }
 
-        let list = List::new(items)
-            .highlight_style(colors.highlight_style())
-            .direction(ListDirection::TopToBottom)
-            .highlight_spacing(HighlightSpacing::Always)
-            .highlight_symbol("> ")
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(colors.border_color()))
-                    .title_style(Style::default().fg(colors.info_color()))
-                    .title(format!("Select Mode ({}/{})", filtered_items.len(), filtered_items.len())),
-            );
-        f.render_stateful_widget(list, layout[0], &mut list_state);
+    /// Start loading local mode data in the background
+    async fn start_loading_local_mode(&mut self, force_refresh: bool) {
+        self.background_op = BackgroundOp::LoadingLocal;
+        self.ui_state = UIState::Loading("Loading local repositories...".to_string());
+        
+        // Start background operation
+        // This is where you'd spawn the actual loading operation
+        // For now, we'll simulate with a simple load
+        if let Err(e) = self.load_local_mode_data(force_refresh).await {
+            self.set_error(format!("Failed to load local repositories: {}", e));
+        } else {
+            self.ui_state = UIState::Normal;
+        }
+        self.background_op = BackgroundOp::None;
+    }
 
-        // Render the input
-        let prompt = Span::styled("Filter: ", Style::default().fg(colors.prompt_color()));
-        let input_text = Span::raw(filter);
-        let input_line = Line::from(vec![prompt, input_text]);
-        let input = Paragraph::new(vec![input_line]);
-        f.render_widget(input, layout[1]);
-        f.set_cursor_position(Position {
-            x: layout[1].x + cursor_pos + 8, // "Filter: " is 8 chars
-            y: layout[1].y,
-        });
+    /// Start loading GitHub mode data in the background
+    async fn start_loading_github_mode(&mut self, force_refresh: bool) {
+        if let PickerMode::GitHub(profile_name) = &self.current_mode {
+            self.background_op = BackgroundOp::LoadingGitHub(profile_name.clone());
+            self.ui_state = UIState::Loading(format!("Loading GitHub repositories for '{}'...", profile_name));
+            
+            if let Err(e) = self.load_github_mode_data(force_refresh).await {
+                self.set_error(format!("Failed to load GitHub repositories: {}", e));
+            } else {
+                self.ui_state = UIState::Normal;
+            }
+            self.background_op = BackgroundOp::None;
+        }
+    }
+
+    /// Start refreshing current mode
+    async fn start_refresh_current_mode(&mut self) {
+        self.background_op = BackgroundOp::RefreshingCurrent;
+        
+        match &self.current_mode {
+            PickerMode::Local => {
+                self.start_loading_local_mode(true).await;
+            }
+            PickerMode::GitHub(_) => {
+                self.start_loading_github_mode(true).await;
+            }
+        }
+    }
+
+    /// Check for background operation completion
+    async fn check_background_operations(&mut self) {
+        // This method would check for completed background operations
+        // and update the UI state accordingly. For now, we'll keep it simple
+        // since we're doing synchronous operations.
+    }
+
+    /// Set error message and switch to error state
+    fn set_error(&mut self, error: String) {
+        self.error_message = Some(error.clone());
+        self.ui_state = UIState::Error(error);
+        self.background_op = BackgroundOp::None;
+    }
+
+    /// Set status message
+    fn set_status(&mut self, message: String) {
+        self.status_message = Some(message);
+    }
+
+    /// Clear status message
+    fn clear_status(&mut self) {
+        self.status_message = None;
     }
 
     /// Clear current data and save the new mode state
@@ -999,7 +1239,7 @@ impl<'a> Picker<'a> {
                             self.selection = ListState::default();
                         }
                         Err(e) => {
-                            eprintln!("Error loading GitHub profile '{}': {}", profile_name, e);
+                            self.set_error(format!("Error loading GitHub profile '{}': {}", profile_name, e));
                         }
                     }
                 }
@@ -1025,9 +1265,9 @@ impl<'a> Picker<'a> {
                 self.selection = ListState::default();
             }
             Err(e) => {
-                eprintln!("Error loading local sessions: {}", e);
+                self.set_error(format!("Error loading local sessions: {}", e));
                 // Fallback to direct session creation if cache fails
-                if let Ok(sessions) = crate::session::create_sessions(self.config) {
+                if let Ok(sessions) = crate::session::create_sessions(self.config).await {
                     self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
                     let injector = self.matcher.injector();
                     
@@ -1103,26 +1343,26 @@ impl<'a> Picker<'a> {
                                             Ok(Some(format!("github:{}", repo_path.to_string_lossy())))
                                         }
                                         Err(e) => {
-                                            eprintln!("Error cloning repository: {}", e);
+                                            self.set_error(format!("Error cloning repository: {}", e));
                                             Err(e)
                                         }
                                     }
                                 } else {
-                                    eprintln!("Repository '{}' not found in profile", repo_name);
+                                    self.set_error(format!("Repository '{}' not found in profile", repo_name));
                                     Ok(None)
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error getting repositories: {}", e);
+                                self.set_error(format!("Error getting repositories: {}", e));
                                 Err(e)
                             }
                         }
                     } else {
-                        eprintln!("GitHub profile '{}' not found", profile_name);
+                        self.set_error(format!("GitHub profile '{}' not found", profile_name));
                         Ok(None)
                     }
                 } else {
-                    eprintln!("GitHub client not available");
+                    self.set_error("GitHub client not available".to_string());
                     Ok(None)
                 }
             }
@@ -1131,3 +1371,162 @@ impl<'a> Picker<'a> {
 }
 
 fn request_redraw() {}
+
+/// Helper function to calculate popup area
+fn popup_area(area: layout::Rect, percent_x: u16, percent_y: u16) -> layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configs::{Config, GitHubProfile};
+
+    #[test]
+    fn test_no_duplicate_modes_creation() {
+        // Create a config with GitHub profiles
+        let mut config = Config::default();
+        config.github_profiles = Some(vec![
+            GitHubProfile {
+                name: "work".to_string(),
+                credentials_command: "echo token1".to_string(),
+                clone_root_path: "~/work".to_string(),
+                clone_method: None,
+            },
+            GitHubProfile {
+                name: "personal".to_string(),
+                credentials_command: "echo token2".to_string(),
+                clone_root_path: "~/personal".to_string(),
+                clone_method: None,
+            },
+        ]);
+
+        // Simulate mode creation like in the constructor
+        let available_modes = create_available_modes(&config);
+
+        // Should have exactly 3 modes: Local + 2 GitHub profiles
+        assert_eq!(available_modes.len(), 3, "Should have exactly 3 modes");
+
+        let mode_names: Vec<String> = available_modes.iter().map(|m| m.display_name()).collect();
+        println!("Created modes: {:?}", mode_names);
+
+        // Check for duplicates
+        let mut seen = std::collections::HashSet::new();
+        for mode in &available_modes {
+            let name = mode.display_name();
+            assert!(seen.insert(name.clone()), "Duplicate mode found: {}", name);
+        }
+
+        // Verify specific modes exist
+        assert!(available_modes.iter().any(|m| matches!(m, PickerMode::Local)), "Should have Local mode");
+        assert!(available_modes.iter().any(|m| matches!(m, PickerMode::GitHub(name) if name == "work")), "Should have work GitHub mode");
+        assert!(available_modes.iter().any(|m| matches!(m, PickerMode::GitHub(name) if name == "personal")), "Should have personal GitHub mode");
+    }
+
+    #[test] 
+    fn test_config_get_github_profiles_no_duplicates() {
+        // Test that get_github_profiles doesn't introduce duplicates
+        let mut config = Config::default();
+        config.github_profiles = Some(vec![
+            GitHubProfile {
+                name: "work".to_string(),
+                credentials_command: "echo token1".to_string(),
+                clone_root_path: "~/work".to_string(),
+                clone_method: None,
+            },
+            GitHubProfile {
+                name: "work".to_string(), // Intentional duplicate name
+                credentials_command: "echo token2".to_string(),
+                clone_root_path: "~/work2".to_string(),
+                clone_method: None,
+            },
+        ]);
+
+        let profiles = config.get_github_profiles();
+        println!("Profile count: {}", profiles.len());
+        for (i, profile) in profiles.iter().enumerate() {
+            println!("Profile {}: name='{}', cmd='{}', path='{}'", 
+                     i, profile.name, profile.credentials_command, profile.clone_root_path);
+        }
+
+        // This should show 2 profiles even though they have the same name
+        // (the config parsing doesn't deduplicate by name, that would be the UI's job)
+        assert_eq!(profiles.len(), 2, "Should have 2 profiles even with duplicate names");
+        
+        // But both should have name "work"
+        assert_eq!(profiles[0].name, "work");
+        assert_eq!(profiles[1].name, "work");
+        
+        // But different credentials commands
+        assert_ne!(profiles[0].credentials_command, profiles[1].credentials_command);
+    }
+
+    #[test]
+    fn test_create_available_modes_deduplicates() {
+        // Test the new deduplication functionality
+        let mut config = Config::default();
+        config.github_profiles = Some(vec![
+            GitHubProfile {
+                name: "work".to_string(),
+                credentials_command: "echo token1".to_string(),
+                clone_root_path: "~/work1".to_string(),
+                clone_method: None,
+            },
+            GitHubProfile {
+                name: "personal".to_string(),
+                credentials_command: "echo token2".to_string(),
+                clone_root_path: "~/personal".to_string(),
+                clone_method: None,
+            },
+            GitHubProfile {
+                name: "work".to_string(), // Duplicate name - should be deduplicated
+                credentials_command: "echo token3".to_string(),
+                clone_root_path: "~/work2".to_string(),
+                clone_method: None,
+            },
+        ]);
+
+        let available_modes = create_available_modes(&config);
+        
+        println!("Available modes count: {}", available_modes.len());
+        for (i, mode) in available_modes.iter().enumerate() {
+            println!("Mode {}: '{}'", i, mode.display_name());
+        }
+
+        // Should have exactly 3 modes: Local + 2 unique GitHub profiles (work deduplicated)
+        assert_eq!(available_modes.len(), 3, "Should have exactly 3 modes after deduplication");
+
+        let mode_names: Vec<String> = available_modes.iter().map(|m| m.display_name()).collect();
+        
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for mode_name in &mode_names {
+            assert!(seen.insert(mode_name.clone()), "Duplicate mode found: {}", mode_name);
+        }
+
+        // Verify specific modes exist
+        assert!(mode_names.contains(&"Local repos".to_string()));
+        assert!(mode_names.contains(&"Github - work".to_string()));
+        assert!(mode_names.contains(&"Github - personal".to_string()));
+        
+        // Should not have two "Github - work" entries
+        let work_count = mode_names.iter().filter(|name| *name == "Github - work").count();
+        assert_eq!(work_count, 1, "Should have exactly one 'Github - work' mode");
+    }
+}

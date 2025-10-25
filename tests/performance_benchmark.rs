@@ -28,8 +28,8 @@ fn create_mock_git_repo(path: &std::path::Path) {
         .expect("Failed to create config");
 }
 
-#[test]
-fn benchmark_wide_directory_structure() {
+#[tokio::test]
+async fn benchmark_wide_directory_structure() {
     // Create a wide directory structure with many repos
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -58,7 +58,7 @@ fn benchmark_wide_directory_structure() {
     };
 
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");
@@ -71,8 +71,8 @@ fn benchmark_wide_directory_structure() {
     assert_eq!(total_repos, repo_count, "Should find exactly {} repositories, found {}", repo_count, total_repos);
 }
 
-#[test]
-fn benchmark_deep_directory_structure() {
+#[tokio::test]
+async fn benchmark_deep_directory_structure() {
     // Create a deep nested structure
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -98,7 +98,7 @@ fn benchmark_deep_directory_structure() {
     };
 
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");
@@ -111,8 +111,8 @@ fn benchmark_deep_directory_structure() {
     assert_eq!(total_repos, repo_count, "Should find exactly {} repositories in deep structure, found {}", repo_count, total_repos);
 }
 
-#[test] 
-fn benchmark_mixed_structure() {
+#[tokio::test]
+async fn benchmark_mixed_structure() {
     // Create a mixed structure that represents real-world scenarios
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -154,7 +154,7 @@ fn benchmark_mixed_structure() {
     };
 
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");
@@ -167,8 +167,8 @@ fn benchmark_mixed_structure() {
     assert_eq!(total_repos, repo_count, "Should find exactly {} repositories, found {}", repo_count, total_repos);
 }
 
-#[test]
-fn benchmark_early_termination() {
+#[tokio::test]
+async fn benchmark_early_termination() {
     // Test that early termination works correctly with large directory structures
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -186,7 +186,7 @@ fn benchmark_early_termination() {
     };
 
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");
@@ -200,8 +200,8 @@ fn benchmark_early_termination() {
     // Note: exact count depends on early termination thresholds
 }
 
-#[test]
-fn benchmark_directory_filtering() {
+#[tokio::test]
+async fn benchmark_directory_filtering() {
     // Test that directory filtering works correctly
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -238,7 +238,7 @@ fn benchmark_directory_filtering() {
     };
 
     let scan_start = Instant::now();
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     let scan_duration = scan_start.elapsed();
     
     assert!(result.is_ok(), "Repository scanning should succeed");

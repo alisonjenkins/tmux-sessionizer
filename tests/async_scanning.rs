@@ -5,8 +5,8 @@ use tempfile::tempdir;
 use tms::configs::{Config, SearchDirectory};
 use tms::repos::find_repos;
 
-#[test]
-fn test_async_scanning_handles_empty_directory() {
+#[tokio::test]
+async fn test_async_scanning_handles_empty_directory() {
     // Test that async scanning gracefully handles empty directories
     let temp = tempdir().expect("Failed to create temp dir");
 
@@ -15,7 +15,7 @@ fn test_async_scanning_handles_empty_directory() {
         ..Default::default()
     };
 
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(
         result.is_ok(),
         "find_repos should succeed even with no repos"
@@ -29,8 +29,8 @@ fn test_async_scanning_handles_empty_directory() {
     );
 }
 
-#[test]
-fn test_async_scanning_with_nested_directories() {
+#[tokio::test]
+async fn test_async_scanning_with_nested_directories() {
     // Test that async scanning can traverse nested directories
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -45,12 +45,12 @@ fn test_async_scanning_with_nested_directories() {
     };
 
     // This should not panic or error even with deep nesting
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(result.is_ok(), "find_repos should succeed with nested dirs");
 }
 
-#[test]
-fn test_async_scanning_respects_depth_limit() {
+#[tokio::test]
+async fn test_async_scanning_respects_depth_limit() {
     // Test that async scanning respects the depth limit
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -66,12 +66,12 @@ fn test_async_scanning_respects_depth_limit() {
         ..Default::default()
     };
 
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(result.is_ok(), "find_repos should succeed with depth limit");
 }
 
-#[test]
-fn test_async_scanning_handles_permission_denied() {
+#[tokio::test]
+async fn test_async_scanning_handles_permission_denied() {
     // This test verifies that the async implementation doesn't panic
     // when encountering directories it can't read
     let temp = tempdir().expect("Failed to create temp dir");
@@ -86,15 +86,15 @@ fn test_async_scanning_handles_permission_denied() {
     };
 
     // Should succeed even if some dirs are inaccessible
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(
         result.is_ok(),
         "find_repos should handle permission errors gracefully"
     );
 }
 
-#[test]
-fn test_async_scanning_multiple_search_paths() {
+#[tokio::test]
+async fn test_async_scanning_multiple_search_paths() {
     // Test scanning multiple paths concurrently
     let temp1 = tempdir().expect("Failed to create temp dir 1");
     let temp2 = tempdir().expect("Failed to create temp dir 2");
@@ -110,15 +110,15 @@ fn test_async_scanning_multiple_search_paths() {
         ..Default::default()
     };
 
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(
         result.is_ok(),
         "find_repos should handle multiple search paths"
     );
 }
 
-#[test]
-fn test_concurrent_directory_scanning() {
+#[tokio::test]
+async fn test_concurrent_directory_scanning() {
     // Create a wide directory structure to test parallel scanning
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -140,7 +140,7 @@ fn test_concurrent_directory_scanning() {
     };
 
     // This tests that parallel scanning doesn't deadlock or panic
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(
         result.is_ok(),
         "Concurrent scanning should complete successfully"

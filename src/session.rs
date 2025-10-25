@@ -10,7 +10,7 @@ use crate::{
     configs::{Config, SessionSortOrderConfig},
     dirty_paths::DirtyUtf8Path,
     error::TmsError,
-    repos::{find_repos, find_repos_streaming, find_submodules, RepoProvider},
+    repos::{find_repos_streaming, find_submodules, RepoProvider},
     tmux::Tmux,
     Result,
 };
@@ -40,15 +40,15 @@ impl Session {
         }
     }
 
-    pub fn switch_to(&self, tmux: &Tmux, config: &Config) -> Result<()> {
+    pub async fn switch_to(&self, tmux: &Tmux, config: &Config) -> Result<()> {
         match &self.session_type {
-            SessionType::Git(repo) => self.switch_to_repo_session(repo, tmux, config),
-            SessionType::Bookmark(path) => self.switch_to_bookmark_session(tmux, path, config),
-            SessionType::GitHub { path, repo_name } => self.switch_to_github_session(tmux, path, repo_name, config),
+            SessionType::Git(repo) => self.switch_to_repo_session(repo, tmux, config).await,
+            SessionType::Bookmark(path) => self.switch_to_bookmark_session(tmux, path, config).await,
+            SessionType::GitHub { path, repo_name } => self.switch_to_github_session(tmux, path, repo_name, config).await,
         }
     }
 
-    fn switch_to_repo_session(
+    async fn switch_to_repo_session(
         &self,
         repo: &RepoProvider,
         tmux: &Tmux,
@@ -67,7 +67,7 @@ impl Session {
 
         if !tmux.session_exists(&session_name) {
             tmux.new_session(Some(&session_name), Some(&path));
-            tmux.set_up_tmux_env(repo, &session_name, config)?;
+            tmux.set_up_tmux_env(repo, &session_name, config).await?;
             tmux.run_session_create_script(self.path(), &session_name, config)?;
         }
 
@@ -76,7 +76,7 @@ impl Session {
         Ok(())
     }
 
-    fn switch_to_bookmark_session(&self, tmux: &Tmux, path: &Path, config: &Config) -> Result<()> {
+    async fn switch_to_bookmark_session(&self, tmux: &Tmux, path: &Path, config: &Config) -> Result<()> {
         let session_name = self.name.replace('.', "_");
 
         if !tmux.session_exists(&session_name) {
@@ -89,7 +89,7 @@ impl Session {
         Ok(())
     }
 
-    fn switch_to_github_session(&self, tmux: &Tmux, path: &Path, _repo_name: &str, config: &Config) -> Result<()> {
+    async fn switch_to_github_session(&self, tmux: &Tmux, path: &Path, _repo_name: &str, config: &Config) -> Result<()> {
         let session_name = self.name.replace('.', "_");
 
         if !tmux.session_exists(&session_name) {
@@ -145,8 +145,8 @@ impl SessionContainer for BTreeMap<String, Session> {
     }
 }
 
-pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
-    let mut sessions = find_repos(config)?;
+pub async fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
+    let mut sessions = crate::repos::find_repos(config).await?;
     sessions = append_bookmarks(config, sessions)?;
 
     let sessions = generate_session_container(sessions, config)?;

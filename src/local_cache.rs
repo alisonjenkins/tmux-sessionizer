@@ -8,7 +8,7 @@ use crate::{
     configs::{Config, LocalRepoCache, LocalCachedSession, LocalSessionType},
     error::TmsError,
     perf_json,
-    repos::{find_repos, RepoProvider},
+    repos::RepoProvider,
     session::{Session, SessionType},
     state::StateManager,
     Result,
@@ -89,7 +89,7 @@ impl LocalCacheManager {
 
     async fn scan_fresh_sessions(&self, config: &Config) -> Result<BTreeMap<String, Session>> {
         // Use existing repo finding logic
-        let repos = find_repos(config)?;
+        let repos = crate::repos::find_repos(config).await?;
         let mut sessions = BTreeMap::new();
 
         // Convert repo results to sessions

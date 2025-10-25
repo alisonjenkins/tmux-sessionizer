@@ -72,13 +72,13 @@ fn get_completion_candidates() -> Vec<CompletionCandidate> {
         .collect::<Vec<_>>()
 }
 
-pub fn marks_command(args: &MarksCommand, config: Config, tmux: &Tmux) -> Result<()> {
+pub async fn marks_command(args: &MarksCommand, config: Config, tmux: &Tmux) -> Result<()> {
     match (&args.cmd, args.index) {
         (None, None) => list(config),
-        (_, Some(index)) => open(index, &config, tmux),
+        (_, Some(index)) => open(index, &config, tmux).await,
         (Some(MarksSubCommand::List), _) => list(config),
         (Some(MarksSubCommand::Set(args)), _) => set(args, config),
-        (Some(MarksSubCommand::Open(args)), _) => open(args.index, &config, tmux),
+        (Some(MarksSubCommand::Open(args)), _) => open(args.index, &config, tmux).await,
         (Some(MarksSubCommand::Delete(args)), _) => delete(args, config),
     }
 }
@@ -127,7 +127,7 @@ fn get_marks(config: &Config) -> Option<Vec<(usize, Session)>> {
     Some(items)
 }
 
-fn open(index: usize, config: &Config, tmux: &Tmux) -> Result<()> {
+async fn open(index: usize, config: &Config, tmux: &Tmux) -> Result<()> {
     let path = config
         .marks
         .as_ref()
@@ -137,7 +137,7 @@ fn open(index: usize, config: &Config, tmux: &Tmux) -> Result<()> {
 
     let session = path_to_session(path)?;
 
-    session.switch_to(tmux, config)
+    session.switch_to(tmux, config).await
 }
 
 fn path_to_session(path: &String) -> Result<Session> {

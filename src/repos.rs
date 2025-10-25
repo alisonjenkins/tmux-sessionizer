@@ -244,7 +244,7 @@ impl RepoProvider {
         }
     }
 
-    pub fn worktrees(&'_ self, config: &Config) -> Result<Vec<Box<dyn Worktree + '_>>> {
+    pub async fn worktrees(&'_ self, config: &Config) -> Result<Vec<Box<dyn Worktree + '_>>> {
         match self {
             RepoProvider::Git(repo) => Ok(repo
                 .worktrees()
@@ -271,7 +271,7 @@ impl RepoProvider {
                             .push(repo);
                     }
                     Ok(())
-                })?;
+                }).await?;
 
                 let mut repos = Arc::try_unwrap(repos)
                     .map_err(|_| TmsError::IoError)
@@ -311,7 +311,7 @@ impl RepoProvider {
     }
 }
 
-pub fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
+pub async fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
     let start_time = Instant::now();
     trace_log!("Starting repository search...");
     
@@ -341,7 +341,7 @@ pub fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>>> {
             repos.insert(session.name.clone(), vec![session]);
         }
         Ok(())
-    })?;
+    }).await?;
 
     let repos = Arc::try_unwrap(repos)
         .map_err(|_| TmsError::IoError)
@@ -709,7 +709,7 @@ async fn search_dirs_streaming(
     Ok(())
 }
 
-fn search_dirs<F>(config: &Config, f: F) -> Result<()>
+async fn search_dirs<F>(config: &Config, f: F) -> Result<()>
 where
     F: Fn(SearchDirectory, RepoProvider) -> Result<()>,
 {
@@ -773,17 +773,6 @@ where
     ];
     common_skip_patterns_vec.sort_unstable(); // Sort for binary search
     let common_skip_patterns = Arc::new(common_skip_patterns_vec);
-
-    // Use a much more optimized tokio runtime for maximum performance
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads((worker_threads * 2).min(64)) // Scale up to 64 threads max
-        .thread_keep_alive(Duration::from_secs(10)) // Shorter keep alive for faster startup
-        .thread_stack_size(1024 * 1024) // Reduce stack size for more threads
-        .enable_io()  // Only enable what we need
-        .build()
-        .change_context(TmsError::IoError)?;
-
-    runtime.block_on(async {
         let mut tasks = Vec::new();
         let mut last_report = Instant::now();
         let mut total_iterations = 0u64;
@@ -1035,7 +1024,6 @@ where
         }
 
         Ok(())
-    })
 }
 
 pub fn find_submodules<'a>(

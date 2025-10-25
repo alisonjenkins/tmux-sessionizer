@@ -24,8 +24,8 @@ fn create_mock_git_repo(path: &std::path::Path) {
         .expect("Failed to create config");
 }
 
-#[test]
-fn test_async_repo_scanning_real() {
+#[tokio::test]
+async fn test_async_repo_scanning_real() {
     // Create a temporary directory structure with multiple mock git repos
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -49,7 +49,7 @@ fn test_async_repo_scanning_real() {
     };
 
     // Run the async repo finder
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(
         result.is_ok(),
         "find_repos should succeed: {:?}",
@@ -68,8 +68,8 @@ fn test_async_repo_scanning_real() {
     );
 }
 
-#[test]
-fn test_repo_scanning_with_worktrees() {
+#[tokio::test]
+async fn test_repo_scanning_with_worktrees() {
     // Test scanning repositories with worktree-like structures
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -94,7 +94,7 @@ fn test_repo_scanning_with_worktrees() {
         ..Default::default()
     };
 
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(result.is_ok(), "Repository scanning should succeed");
     
     let repos = result.unwrap();
@@ -103,8 +103,8 @@ fn test_repo_scanning_with_worktrees() {
     assert!(repos.len() >= 1, "Should find at least 1 repository");
 }
 
-#[test]
-fn test_repo_scanning_mixed_content() {
+#[tokio::test]
+async fn test_repo_scanning_mixed_content() {
     // Test scanning directories with both repos and regular directories
     let temp = tempdir().expect("Failed to create temp dir");
     let base_path = temp.path();
@@ -139,7 +139,7 @@ fn test_repo_scanning_mixed_content() {
         ..Default::default()
     };
 
-    let result = find_repos(&config);
+    let result = find_repos(&config).await;
     assert!(result.is_ok(), "Repository scanning should succeed");
     
     let repos = result.unwrap();

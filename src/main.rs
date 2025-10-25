@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
                 let _ = config.save();
                 
                 // Switch to the GitHub session
-                if let Err(e) = github_session.switch_to(&tmux, &config) {
+                if let Err(e) = github_session.switch_to(&tmux, &config).await {
                     eprintln!("Error switching to GitHub session: {}", e);
                     std::process::exit(1);
                 }
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
                 let _ = config.save();
                 
                 // Use the proper session.switch_to method which handles paths correctly
-                if let Err(e) = session.switch_to(&tmux, &config) {
+                if let Err(e) = session.switch_to(&tmux, &config).await {
                     eprintln!("Error switching to session: {}", e);
                     std::process::exit(1);
                 }
