@@ -6,13 +6,11 @@ use serde_derive::Deserialize;
 use tokio::process::Command as AsyncCommand;
 
 use crate::{
-    configs::{GitHubCloneMethod, GitHubProfile, GitHubRepo, GitHubRepoCache},
+    configs::{GitHubCloneMethod, GitHubProfile, GitHubRepo, GitHubRepoCache, Config},
     error::TmsError,
     state::StateManager,
     Result,
 };
-
-const CACHE_DURATION_SECONDS: u64 = 3600; // 1 hour
 
 #[derive(Debug, Deserialize)]
 struct GitHubApiRepo {
@@ -35,17 +33,17 @@ impl GitHubClient {
         Ok(GitHubClient { state_manager })
     }
 
-    pub async fn get_repositories(&self, profile: &GitHubProfile, force_refresh: bool) -> Result<Vec<GitHubRepo>> {
+    pub async fn get_repositories(&self, profile: &GitHubProfile, config: &Config, force_refresh: bool) -> Result<Vec<GitHubRepo>> {
         let cache_file = self.state_manager.get_cache_file_path(&profile.name);
         
         // Try to load from cache first if not forcing refresh
         if !force_refresh {
-            if let Ok(cached_repos) = self.load_cached_repos(&cache_file).await {
+            if let Ok(cached_repos) = self.load_cached_repos(&cache_file, config).await {
                 return Ok(cached_repos);
             }
         }
 
-        // Get fresh token
+        // Get fresh token only when we need to fetch from API
         let token = self.get_access_token(&profile.credentials_command).await?;
         
         // Fetch repositories from GitHub API
@@ -57,7 +55,7 @@ impl GitHubClient {
         Ok(repos)
     }
 
-    async fn load_cached_repos(&self, cache_file: &Path) -> Result<Vec<GitHubRepo>> {
+    async fn load_cached_repos(&self, cache_file: &Path, config: &Config) -> Result<Vec<GitHubRepo>> {
         let cache_content = tokio::fs::read_to_string(cache_file)
             .await
             .change_context(TmsError::IoError)?;
@@ -65,13 +63,15 @@ impl GitHubClient {
         let cache: GitHubRepoCache = serde_json::from_str(&cache_content)
             .change_context(TmsError::IoError)?;
             
-        // Check if cache is still valid
+        // Check if cache is still valid using configurable duration
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-            
-        if now - cache.cached_at > CACHE_DURATION_SECONDS {
+        
+        let cache_duration_seconds = config.get_github_cache_duration_hours() * 3600;
+        
+        if now - cache.cached_at > cache_duration_seconds {
             return Err(TmsError::IoError.into()); // Cache expired
         }
         

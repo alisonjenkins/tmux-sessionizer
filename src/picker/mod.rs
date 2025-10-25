@@ -25,6 +25,7 @@ use crate::{
     configs::{PickerColorConfig, Config},
     github::GitHubClient,
     keymap::{Keymap, PickerAction},
+    session::SessionContainer,
     state::StateManager,
     tmux::Tmux,
     Result, TmsError,
@@ -258,7 +259,7 @@ impl<'a> Picker<'a> {
     async fn async_main_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
         // Load initial data for the current mode if it's a GitHub profile
         if matches!(self.current_mode, PickerMode::GitHub(_)) {
-            if let Err(e) = self.refresh_current_mode().await {
+            if let Err(e) = self.load_github_mode_data(false).await {
                 eprintln!("Warning: Error loading initial GitHub repositories: {}", e);
             }
         }
@@ -296,10 +297,25 @@ impl<'a> Picker<'a> {
                             let refresh_key = &self.config.get_picker_refresh_key();
                             
                             if key.code == KeyCode::Tab && switch_key == "tab" {
-                                self.switch_to_next_mode();
-                                // Load data for the new mode
-                                if let Err(e) = self.refresh_current_mode().await {
-                                    eprintln!("Error loading data for mode: {}", e);
+                                // Show mode selection picker
+                                if let Some(selected_mode) = self.show_mode_picker().await? {
+                                    if selected_mode != self.current_mode {
+                                        self.current_mode = selected_mode;
+                                        self.clear_and_save_mode();
+                                        // Load data for the new mode
+                                        match &self.current_mode {
+                                            PickerMode::Local => {
+                                                if let Err(e) = self.refresh_current_mode().await {
+                                                    eprintln!("Error loading local repositories: {}", e);
+                                                }
+                                            }
+                                            PickerMode::GitHub(_) => {
+                                                if let Err(e) = self.load_github_mode_data(false).await {
+                                                    eprintln!("Error loading GitHub repositories: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 continue;
                             } else if key.code == KeyCode::F(5) && refresh_key == "f5" {
@@ -316,7 +332,26 @@ impl<'a> Picker<'a> {
                                     }
                                 }
                                 Some(PickerAction::SwitchMode) => {
-                                    self.switch_to_next_mode();
+                                    // Show mode selection picker
+                                    if let Some(selected_mode) = self.show_mode_picker().await? {
+                                        if selected_mode != self.current_mode {
+                                            self.current_mode = selected_mode;
+                                            self.clear_and_save_mode();
+                                            // Load data for the new mode
+                                            match &self.current_mode {
+                                                PickerMode::Local => {
+                                                    if let Err(e) = self.refresh_current_mode().await {
+                                                        eprintln!("Error loading local repositories: {}", e);
+                                                    }
+                                                }
+                                                PickerMode::GitHub(_) => {
+                                                    if let Err(e) = self.load_github_mode_data(false).await {
+                                                        eprintln!("Error loading GitHub repositories: {}", e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 Some(PickerAction::Refresh) => {
                                     self.refresh_current_mode().await?;
@@ -739,60 +774,268 @@ impl<'a> Picker<'a> {
         self.cursor_pos = u16::try_from(self.filter.len()).unwrap_or_default();
     }
 
-    fn switch_to_next_mode(&mut self) {
+    /// Show a mode selection picker and return the selected mode
+    async fn show_mode_picker(&self) -> Result<Option<PickerMode>> {
         if self.available_modes.len() <= 1 {
-            return;
+            return Ok(None);
         }
 
+        // Create mode display strings
+        let mode_strings: Vec<String> = self.available_modes.iter()
+            .map(|mode| mode.display_name())
+            .collect();
+
+        // Find current mode index for initial selection
         let current_index = self.available_modes.iter()
             .position(|mode| mode == &self.current_mode)
             .unwrap_or(0);
+
+        // Create a simple mode selector using the same terminal
+        let selected_index = self.run_simple_picker(&mode_strings, current_index).await?;
         
-        let next_index = (current_index + 1) % self.available_modes.len();
-        self.current_mode = self.available_modes[next_index].clone();
+        if let Some(index) = selected_index {
+            Ok(Some(self.available_modes[index].clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Run a simple picker for mode selection without recursion
+    async fn run_simple_picker(&self, items: &[String], initial_selection: usize) -> Result<Option<usize>> {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            return Err(TmsError::TuiError(
+                "Cannot initialize terminal (no TTY available)".to_string()
+            ).into());
+        }
+
+        let mut terminal = ratatui::init();
+        let result = self.simple_picker_loop(&mut terminal, items, initial_selection).await;
+        ratatui::restore();
         
+        result.map_err(|e| TmsError::TuiError(e.to_string()).into())
+    }
+
+    /// Simple picker loop for mode selection
+    async fn simple_picker_loop(
+        &self,
+        terminal: &mut DefaultTerminal, 
+        items: &[String], 
+        initial_selection: usize
+    ) -> Result<Option<usize>> {
+        let mut selection = initial_selection.min(items.len().saturating_sub(1));
+        let mut filter = String::new();
+        let mut cursor_pos = 0u16;
+        
+        loop {
+            // Filter items based on current filter
+            let filtered_items: Vec<(usize, &String)> = items.iter().enumerate()
+                .filter(|(_, item)| {
+                    if filter.is_empty() {
+                        true
+                    } else {
+                        item.to_lowercase().contains(&filter.to_lowercase())
+                    }
+                })
+                .collect();
+
+            // Update selection to be within filtered bounds
+            if selection >= filtered_items.len() && !filtered_items.is_empty() {
+                selection = filtered_items.len() - 1;
+            }
+
+            terminal.draw(|f| self.render_simple_picker(f, &filtered_items, selection, &filter, cursor_pos))
+                .map_err(|e| TmsError::TuiError(e.to_string()))?;
+
+            let timeout = std::time::Duration::from_millis(100);
+            match crossterm::event::poll(timeout).map_err(|e| TmsError::TuiError(e.to_string()))? {
+                true => {
+                    if let Event::Key(key) = event::read().map_err(|e| TmsError::TuiError(e.to_string()))? {
+                        if key.kind == KeyEventKind::Press {
+                            match key.code {
+                                KeyCode::Esc => return Ok(None),
+                                KeyCode::Enter => {
+                                    if !filtered_items.is_empty() && selection < filtered_items.len() {
+                                        return Ok(Some(filtered_items[selection].0));
+                                    }
+                                }
+                                KeyCode::Up => {
+                                    if !filtered_items.is_empty() {
+                                        selection = if selection == 0 { 
+                                            filtered_items.len() - 1 
+                                        } else { 
+                                            selection - 1 
+                                        };
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if !filtered_items.is_empty() {
+                                        selection = (selection + 1) % filtered_items.len();
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    filter.insert(cursor_pos as usize, c);
+                                    cursor_pos += 1;
+                                    selection = 0; // Reset selection when filtering
+                                }
+                                KeyCode::Backspace => {
+                                    if cursor_pos > 0 {
+                                        filter.remove(cursor_pos as usize - 1);
+                                        cursor_pos -= 1;
+                                        selection = 0; // Reset selection when filtering
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                false => continue,
+            }
+        }
+    }
+
+    /// Render the simple mode picker
+    fn render_simple_picker(
+        &self,
+        f: &mut Frame,
+        filtered_items: &[(usize, &String)],
+        selection: usize,
+        filter: &str,
+        cursor_pos: u16,
+    ) {
+        use ratatui::{
+            layout::{Constraint, Direction, Layout, Position},
+            style::Style,
+            text::{Line, Span},
+            widgets::{Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState, Paragraph},
+        };
+
+        let area = f.area();
+        let layout = Layout::new(
+            Direction::Vertical,
+            [Constraint::Length(area.height.saturating_sub(1)), Constraint::Length(1)]
+        ).split(area);
+
+        let colors = if let Some(colors) = self.colors {
+            colors.to_owned()
+        } else {
+            PickerColorConfig::default_colors()
+        };
+
+        // Render the list
+        let items: Vec<ListItem> = filtered_items.iter()
+            .map(|(_, item)| ListItem::new(item.as_str()))
+            .collect();
+
+        let mut list_state = ListState::default();
+        if !filtered_items.is_empty() && selection < filtered_items.len() {
+            list_state.select(Some(selection));
+        }
+
+        let list = List::new(items)
+            .highlight_style(colors.highlight_style())
+            .direction(ListDirection::TopToBottom)
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol("> ")
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(colors.border_color()))
+                    .title_style(Style::default().fg(colors.info_color()))
+                    .title(format!("Select Mode ({}/{})", filtered_items.len(), filtered_items.len())),
+            );
+        f.render_stateful_widget(list, layout[0], &mut list_state);
+
+        // Render the input
+        let prompt = Span::styled("Filter: ", Style::default().fg(colors.prompt_color()));
+        let input_text = Span::raw(filter);
+        let input_line = Line::from(vec![prompt, input_text]);
+        let input = Paragraph::new(vec![input_line]);
+        f.render_widget(input, layout[1]);
+        f.set_cursor_position(Position {
+            x: layout[1].x + cursor_pos + 8, // "Filter: " is 8 chars
+            y: layout[1].y,
+        });
+    }
+
+    /// Clear current data and save the new mode state
+    fn clear_and_save_mode(&mut self) {
         // Clear current items and reset selection
         self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
         self.selection = ListState::default();
         self.total_items_added = 0;
         
-        // We'll load items for the new mode in the main loop via refresh_current_mode
+        // Save the active profile state
+        if let Some(ref state_manager) = self.state_manager {
+            let profile_name = match &self.current_mode {
+                PickerMode::Local => Some("local".to_string()),
+                PickerMode::GitHub(name) => Some(name.clone()),
+            };
+            let _ = state_manager.set_active_profile(profile_name);
+        }
+    }
+
+    async fn load_github_mode_data(&mut self, force_refresh: bool) -> Result<()> {
+        if let PickerMode::GitHub(profile_name) = &self.current_mode {
+            if let Some(ref github_client) = self.github_client {
+                if let Some(profile) = self.config.get_github_profiles().iter()
+                    .find(|p| &p.name == profile_name) {
+                    
+                    match github_client.get_repositories(profile, self.config, force_refresh).await {
+                        Ok(repos) => {
+                            // Clear current matcher and add GitHub repos
+                            self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+                            let injector = self.matcher.injector();
+                            
+                            let repo_count = repos.len();
+                            for repo in &repos {
+                                let display_name = format!("{} - {}", repo.name, 
+                                    repo.description.as_deref().unwrap_or("No description"));
+                                injector.push(display_name.clone(), |_, dst| dst[0] = display_name.into());
+                            }
+                            
+                            self.total_items_added = repo_count;
+                            self.selection = ListState::default();
+                        }
+                        Err(e) => {
+                            eprintln!("Error loading GitHub profile '{}': {}", profile_name, e);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn refresh_current_mode(&mut self) -> Result<()> {
         match &self.current_mode {
             PickerMode::Local => {
-                // For local mode, we don't need to do anything special since
-                // the streaming should handle local repositories
-                // This could be extended to re-scan local directories
-            }
-            PickerMode::GitHub(profile_name) => {
-                if let Some(ref github_client) = self.github_client {
-                    if let Some(profile) = self.config.get_github_profiles().iter()
-                        .find(|p| &p.name == profile_name) {
+                // For local mode, we need to reload local repositories
+                // Clear current matcher and restart local scanning if we have a receiver
+                if self.receiver.is_some() {
+                    // For streaming mode, we can't easily restart the scan, so we keep existing items
+                    // The user can manually refresh by restarting the application
+                    // This could be enhanced in the future to support re-scanning
+                } else {
+                    // For non-streaming mode, reload the sessions
+                    if let Ok(sessions) = crate::session::create_sessions(self.config) {
+                        self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+                        let injector = self.matcher.injector();
                         
-                        match github_client.get_repositories(profile, true).await {
-                            Ok(repos) => {
-                                // Clear current matcher and add GitHub repos
-                                self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
-                                let injector = self.matcher.injector();
-                                
-                                let repo_count = repos.len();
-                                for repo in &repos {
-                                    let display_name = format!("{} - {}", repo.name, 
-                                        repo.description.as_deref().unwrap_or("No description"));
-                                    injector.push(display_name.clone(), |_, dst| dst[0] = display_name.into());
-                                }
-                                
-                                self.total_items_added = repo_count;
-                                self.selection = ListState::default();
-                            }
-                            Err(e) => {
-                                eprintln!("Error refreshing GitHub profile '{}': {}", profile_name, e);
-                            }
+                        let session_list = sessions.list_sorted(self.config);
+                        for session_name in &session_list {
+                            injector.push(session_name.clone(), |_, dst| dst[0] = session_name.clone().into());
                         }
+                        
+                        self.total_items_added = session_list.len();
+                        self.selection = ListState::default();
                     }
                 }
+            }
+            PickerMode::GitHub(_) => {
+                // Force refresh for GitHub profiles when explicitly requested
+                self.load_github_mode_data(true).await?;
             }
         }
         Ok(())
@@ -822,7 +1065,7 @@ impl<'a> Picker<'a> {
                         let repo_name = selected.split(" - ").next().unwrap_or(selected);
                         
                         // Get the repository details
-                        match github_client.get_repositories(profile, false).await {
+                        match github_client.get_repositories(profile, self.config, false).await {
                             Ok(repos) => {
                                 if let Some(repo) = repos.iter().find(|r| r.name == repo_name) {
                                     // Get clone root path

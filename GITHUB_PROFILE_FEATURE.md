@@ -1,3 +1,9 @@
+---
+id: GITHUB_PROFILE_FEATURE
+aliases:
+  - GitHub Profiles Feature
+tags: []
+---
 # GitHub Profiles Feature
 
 This feature allows you to easily clone and work with repositories from GitHub directly from the tmux-sessionizer picker interface.
@@ -33,7 +39,7 @@ The application follows XDG Base Directory specifications for managing runtime s
 - **Contents**: `state.json` - stores the currently active profile
 - **Purpose**: Persists your last used mode between sessions
 
-### Cache Directory  
+### Cache Directory
 - **Location**: `$XDG_CACHE_HOME/tms/github/` (defaults to `~/.cache/tms/github/`)
 - **Contents**: `<profile-name>.json` files containing cached repository lists
 - **Purpose**: Minimizes GitHub API calls by caching repository data for 1 hour
@@ -95,7 +101,7 @@ With the example configuration above, your directories would be organized as:
 ├── github/           # Personal repositories
 │   ├── repo1/
 │   └── repo2/
-├── work/             # Work repositories  
+├── work/             # Work repositories
 │   ├── project-a/
 │   └── project-b/
 └── local-repos/      # Your existing local repositories

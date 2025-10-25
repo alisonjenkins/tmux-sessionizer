@@ -58,6 +58,7 @@ pub struct Config {
     pub github_profiles: Option<Vec<GitHubProfile>>,
     pub picker_switch_mode_key: Option<String>, // default: "tab"
     pub picker_refresh_key: Option<String>, // default: "f5"
+    pub github_cache_duration_hours: Option<u64>, // default: 24*30 (1 month)
 }
 
 pub const DEFAULT_VCS_PROVIDERS: &[VcsProviders] = &[VcsProviders::Git];
@@ -92,6 +93,7 @@ pub struct ConfigExport {
     pub github_profiles: Vec<GitHubProfile>,
     pub picker_switch_mode_key: String,
     pub picker_refresh_key: String,
+    pub github_cache_duration_hours: u64,
 }
 
 impl From<Config> for ConfigExport {
@@ -123,6 +125,7 @@ impl From<Config> for ConfigExport {
             github_profiles: value.github_profiles.unwrap_or_default(),
             picker_switch_mode_key: value.picker_switch_mode_key.unwrap_or_else(|| "tab".to_string()),
             picker_refresh_key: value.picker_refresh_key.unwrap_or_else(|| "f5".to_string()),
+            github_cache_duration_hours: value.github_cache_duration_hours.unwrap_or(24 * 30), // 1 month
         }
     }
 }
@@ -369,6 +372,10 @@ impl Config {
 
     pub fn get_picker_refresh_key(&self) -> String {
         self.picker_refresh_key.clone().unwrap_or_else(|| "f5".to_string())
+    }
+
+    pub fn get_github_cache_duration_hours(&self) -> u64 {
+        self.github_cache_duration_hours.unwrap_or(24 * 30) // 1 month
     }
 }
 
