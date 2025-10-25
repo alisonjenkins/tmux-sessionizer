@@ -6,6 +6,7 @@ pub mod github;
 pub mod keymap;
 pub mod local_cache;
 pub mod marks;
+pub mod perf_json;
 pub mod picker;
 pub mod repos;
 pub mod session;

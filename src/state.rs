@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use error_stack::ResultExt;
 use serde_derive::{Deserialize, Serialize};
 
-use crate::{error::TmsError, Result};
+use crate::{error::TmsError, perf_json, Result};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppState {
@@ -52,10 +52,11 @@ impl StateManager {
             return Ok(AppState::default());
         }
 
+        // Use blocking version for sync method
         let content = std::fs::read_to_string(&state_file)
             .change_context(TmsError::IoError)?;
             
-        let state: AppState = serde_json::from_str(&content)
+        let state: AppState = perf_json::from_str(&content)
             .change_context(TmsError::IoError)?;
             
         Ok(state)
@@ -64,7 +65,7 @@ impl StateManager {
     pub fn save_state(&self, state: &AppState) -> Result<()> {
         let state_file = self.state_dir.join("state.json");
         
-        let content = serde_json::to_string_pretty(state)
+        let content = perf_json::to_string_pretty(state)
             .change_context(TmsError::IoError)?;
             
         std::fs::write(state_file, content)

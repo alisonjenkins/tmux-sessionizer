@@ -8,6 +8,7 @@ use tokio::process::Command as AsyncCommand;
 use crate::{
     configs::{GitHubCloneMethod, GitHubProfile, GitHubRepo, GitHubRepoCache, Config},
     error::TmsError,
+    perf_json,
     state::StateManager,
     Result,
 };
@@ -56,11 +57,7 @@ impl GitHubClient {
     }
 
     async fn load_cached_repos(&self, cache_file: &Path, config: &Config) -> Result<Vec<GitHubRepo>> {
-        let cache_content = tokio::fs::read_to_string(cache_file)
-            .await
-            .change_context(TmsError::IoError)?;
-            
-        let cache: GitHubRepoCache = serde_json::from_str(&cache_content)
+        let cache: GitHubRepoCache = perf_json::from_file(cache_file).await
             .change_context(TmsError::IoError)?;
             
         // Check if cache is still valid using configurable duration
@@ -170,11 +167,7 @@ impl GitHubClient {
                 .as_secs(),
         };
 
-        let cache_content = serde_json::to_string_pretty(&cache)
-            .change_context(TmsError::IoError)?;
-
-        tokio::fs::write(cache_file, cache_content)
-            .await
+        perf_json::to_file(cache_file, &cache).await
             .change_context(TmsError::IoError)?;
 
         Ok(())
