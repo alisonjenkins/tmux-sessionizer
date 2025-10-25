@@ -74,6 +74,7 @@ fn tms_config() -> anyhow::Result<()> {
         picker_switch_mode_key: None,
         picker_refresh_key: None,
         github_cache_duration_hours: None,
+        local_cache_duration_hours: None,
     };
 
     let mut tms = Command::cargo_bin("tms")?;

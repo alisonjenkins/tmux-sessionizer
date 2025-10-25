@@ -305,7 +305,7 @@ impl<'a> Picker<'a> {
                                         // Load data for the new mode
                                         match &self.current_mode {
                                             PickerMode::Local => {
-                                                if let Err(e) = self.refresh_current_mode().await {
+                                                if let Err(e) = self.load_local_mode_data(false).await {
                                                     eprintln!("Error loading local repositories: {}", e);
                                                 }
                                             }
@@ -340,7 +340,7 @@ impl<'a> Picker<'a> {
                                             // Load data for the new mode
                                             match &self.current_mode {
                                                 PickerMode::Local => {
-                                                    if let Err(e) = self.refresh_current_mode().await {
+                                                    if let Err(e) = self.load_local_mode_data(false).await {
                                                         eprintln!("Error loading local repositories: {}", e);
                                                     }
                                                 }
@@ -1008,29 +1008,53 @@ impl<'a> Picker<'a> {
         Ok(())
     }
 
+    async fn load_local_mode_data(&mut self, force_refresh: bool) -> Result<()> {
+        // Use cached sessions for better performance
+        match crate::session::create_sessions_cached(self.config, force_refresh).await {
+            Ok(sessions) => {
+                // Clear current matcher and add local sessions
+                self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+                let injector = self.matcher.injector();
+                
+                let session_list = sessions.list_sorted(self.config);
+                for session_name in &session_list {
+                    injector.push(session_name.clone(), |_, dst| dst[0] = session_name.clone().into());
+                }
+                
+                self.total_items_added = session_list.len();
+                self.selection = ListState::default();
+            }
+            Err(e) => {
+                eprintln!("Error loading local sessions: {}", e);
+                // Fallback to direct session creation if cache fails
+                if let Ok(sessions) = crate::session::create_sessions(self.config) {
+                    self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+                    let injector = self.matcher.injector();
+                    
+                    let session_list = sessions.list_sorted(self.config);
+                    for session_name in &session_list {
+                        injector.push(session_name.clone(), |_, dst| dst[0] = session_name.clone().into());
+                    }
+                    
+                    self.total_items_added = session_list.len();
+                    self.selection = ListState::default();
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn refresh_current_mode(&mut self) -> Result<()> {
         match &self.current_mode {
             PickerMode::Local => {
-                // For local mode, we need to reload local repositories
-                // Clear current matcher and restart local scanning if we have a receiver
+                // For local mode, use cached sessions unless in streaming mode
                 if self.receiver.is_some() {
                     // For streaming mode, we can't easily restart the scan, so we keep existing items
                     // The user can manually refresh by restarting the application
                     // This could be enhanced in the future to support re-scanning
                 } else {
-                    // For non-streaming mode, reload the sessions
-                    if let Ok(sessions) = crate::session::create_sessions(self.config) {
-                        self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
-                        let injector = self.matcher.injector();
-                        
-                        let session_list = sessions.list_sorted(self.config);
-                        for session_name in &session_list {
-                            injector.push(session_name.clone(), |_, dst| dst[0] = session_name.clone().into());
-                        }
-                        
-                        self.total_items_added = session_list.len();
-                        self.selection = ListState::default();
-                    }
+                    // Force refresh for local sessions when explicitly requested (F5)
+                    self.load_local_mode_data(true).await?;
                 }
             }
             PickerMode::GitHub(_) => {

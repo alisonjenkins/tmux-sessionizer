@@ -59,6 +59,7 @@ pub struct Config {
     pub picker_switch_mode_key: Option<String>, // default: "tab"
     pub picker_refresh_key: Option<String>, // default: "f5"
     pub github_cache_duration_hours: Option<u64>, // default: 24*30 (1 month)
+    pub local_cache_duration_hours: Option<u64>, // default: 24 (1 day)
 }
 
 pub const DEFAULT_VCS_PROVIDERS: &[VcsProviders] = &[VcsProviders::Git];
@@ -94,6 +95,7 @@ pub struct ConfigExport {
     pub picker_switch_mode_key: String,
     pub picker_refresh_key: String,
     pub github_cache_duration_hours: u64,
+    pub local_cache_duration_hours: u64,
 }
 
 impl From<Config> for ConfigExport {
@@ -126,6 +128,7 @@ impl From<Config> for ConfigExport {
             picker_switch_mode_key: value.picker_switch_mode_key.unwrap_or_else(|| "tab".to_string()),
             picker_refresh_key: value.picker_refresh_key.unwrap_or_else(|| "f5".to_string()),
             github_cache_duration_hours: value.github_cache_duration_hours.unwrap_or(24 * 30), // 1 month
+            local_cache_duration_hours: value.local_cache_duration_hours.unwrap_or(24), // 1 day
         }
     }
 }
@@ -376,6 +379,10 @@ impl Config {
 
     pub fn get_github_cache_duration_hours(&self) -> u64 {
         self.github_cache_duration_hours.unwrap_or(24 * 30) // 1 month
+    }
+
+    pub fn get_local_cache_duration_hours(&self) -> u64 {
+        self.local_cache_duration_hours.unwrap_or(24) // 1 day
     }
 }
 
@@ -744,4 +751,26 @@ pub struct GitHubRepo {
     pub clone_url_https: String,
     pub description: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct LocalRepoCache {
+    pub search_dirs: Vec<SearchDirectory>,
+    pub sessions: Vec<LocalCachedSession>,
+    pub bookmarks: Vec<String>,
+    pub cached_at: u64, // Unix timestamp
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct LocalCachedSession {
+    pub name: String,
+    pub path: String,
+    pub session_type: LocalSessionType,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum LocalSessionType {
+    Git,
+    Jujutsu,
+    Bookmark,
 }

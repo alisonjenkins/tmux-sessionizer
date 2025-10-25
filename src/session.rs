@@ -154,6 +154,13 @@ pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
     Ok(sessions)
 }
 
+/// Create sessions using cache when possible, scanning only when necessary
+pub async fn create_sessions_cached(config: &Config, force_refresh: bool) -> Result<impl SessionContainer> {
+    let cache_manager = crate::local_cache::LocalCacheManager::new()?;
+    let sessions = cache_manager.get_local_sessions(config, force_refresh).await?;
+    Ok(sessions)
+}
+
 /// Create a streaming session channel that yields sessions as repositories are found
 /// Returns a tuple of (display_names_receiver, session_container)
 /// The session_container will be populated as sessions are found

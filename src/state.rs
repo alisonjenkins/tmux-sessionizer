@@ -36,6 +36,8 @@ impl StateManager {
             .change_context(TmsError::IoError)?;
         std::fs::create_dir_all(&cache_dir.join("github"))
             .change_context(TmsError::IoError)?;
+        std::fs::create_dir_all(&cache_dir.join("local"))
+            .change_context(TmsError::IoError)?;
 
         Ok(StateManager {
             state_dir,
@@ -87,8 +89,16 @@ impl StateManager {
         self.cache_dir.join("github")
     }
 
+    pub fn get_local_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("local")
+    }
+
     pub fn get_cache_file_path(&self, profile_name: &str) -> PathBuf {
         self.get_github_cache_dir().join(format!("{}.json", profile_name))
+    }
+
+    pub fn get_local_cache_file_path(&self) -> PathBuf {
+        self.get_local_cache_dir().join("sessions.json")
     }
 }
 

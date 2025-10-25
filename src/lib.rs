@@ -4,6 +4,7 @@ pub mod dirty_paths;
 pub mod error;
 pub mod github;
 pub mod keymap;
+pub mod local_cache;
 pub mod marks;
 pub mod picker;
 pub mod repos;
