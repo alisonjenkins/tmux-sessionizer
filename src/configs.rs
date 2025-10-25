@@ -247,6 +247,24 @@ impl Config {
             );
         }
 
+        // Deduplicate search directories by path to prevent scanning the same directory multiple times
+        // Keep the entry with the maximum depth for each unique path
+        let mut seen_paths = std::collections::HashMap::new();
+        for dir in search_dirs {
+            match seen_paths.entry(dir.path.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(dir);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    // Keep the directory with the greater depth
+                    if dir.depth > entry.get().depth {
+                        entry.insert(dir);
+                    }
+                }
+            }
+        }
+        let search_dirs: Vec<_> = seen_paths.into_values().collect();
+
         Ok(search_dirs)
     }
 
@@ -617,6 +635,40 @@ mod tests {
         // Test unknown session has zero score
         let unknown_score = config.get_session_frecency_score("unknown_session");
         assert_eq!(unknown_score, 0.0, "Unknown session should have zero frecency score");
+    }
+
+    #[test]
+    fn test_search_dirs_deduplication() {
+        // Create a config with duplicate search directories
+        let mut config = Config::default();
+        config.search_dirs = Some(vec![
+            SearchDirectory::new("/tmp/test".into(), 5),
+            SearchDirectory::new("/tmp/test".into(), 10), // Same path, different depth
+            SearchDirectory::new("/tmp/other".into(), 5),
+            SearchDirectory::new("/tmp/test".into(), 3),  // Same path again, lower depth
+        ]);
+        
+        // For this test, we need to create the directories temporarily
+        std::fs::create_dir_all("/tmp/test").ok();
+        std::fs::create_dir_all("/tmp/other").ok();
+        
+        let search_dirs = config.search_dirs().unwrap();
+        
+        // Should have only 2 unique paths
+        assert_eq!(search_dirs.len(), 2, "Should deduplicate paths and have only 2 unique directories");
+        
+        // Find the /tmp/test entry
+        let test_dir = search_dirs.iter().find(|d| d.path.ends_with("test")).unwrap();
+        // Should keep the highest depth (10)
+        assert_eq!(test_dir.depth, 10, "Should keep the directory entry with the highest depth");
+        
+        // Find the /tmp/other entry
+        let other_dir = search_dirs.iter().find(|d| d.path.ends_with("other")).unwrap();
+        assert_eq!(other_dir.depth, 5, "Other directory should have original depth");
+        
+        // Cleanup
+        std::fs::remove_dir_all("/tmp/test").ok();
+        std::fs::remove_dir_all("/tmp/other").ok();
     }
 }
 
