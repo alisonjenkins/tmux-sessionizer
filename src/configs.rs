@@ -7,7 +7,7 @@ use ratatui::style::{Color, Style, Stylize};
 
 use crate::{error::Suggestion, keymap::Keymap, picker::InputPosition};
 
-type Result<T> = error_stack::Result<T, ConfigError>;
+type Result<T> = core::result::Result<T, error_stack::Report<ConfigError>>;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -155,13 +155,13 @@ impl Config {
                     }
                     if !config_found {
                         return Err(ConfigError::LoadError)
-                            .attach_printable("Could not find a valid location for config file (both home and config dirs cannot be found)")
+                            .attach("Could not find a valid location for config file (both home and config dirs cannot be found)")
                             .attach(Suggestion("Try specifying a config file with the TMS_CONFIG_FILE environment variable."));
                     }
                     builder
                 }
                 env::VarError::NotUnicode(_) => {
-                    return Err(ConfigError::LoadError).attach_printable(
+                    return Err(ConfigError::LoadError).attach(
                         "Invalid non-unicode value for TMS_CONFIG_FILE env variable",
                     );
                 }
@@ -170,11 +170,11 @@ impl Config {
         let config = config_builder
             .build()
             .change_context(ConfigError::LoadError)
-            .attach_printable("Could not parse configuration")?;
+            .attach("Could not parse configuration")?;
         config
             .try_deserialize()
             .change_context(ConfigError::LoadError)
-            .attach_printable("Could not deserialize configuration")
+            .attach("Could not deserialize configuration")
     }
 
     pub fn save(&self) -> Result<()> {
@@ -194,7 +194,7 @@ impl Config {
                     home_path.as_path().join(".config/tms/config.toml")
                 } else {
                     return Err(ConfigError::LoadError)
-                        .attach_printable("Could not find a valid location to write config file (both home and config dirs cannot be found)")
+                        .attach("Could not find a valid location to write config file (both home and config dirs cannot be found)")
                         .attach(Suggestion("Try specifying a config file with the TMS_CONFIG_FILE environment variable."));
                 }
             }
@@ -202,14 +202,14 @@ impl Config {
         let parent = path
             .parent()
             .ok_or(ConfigError::FileWriteError)
-            .attach_printable(format!(
+            .attach(format!(
                 "Unable to determine parent directory of specified tms config file: {}",
                 path.to_str()
                     .unwrap_or("(path could not be converted to string)")
             ))?;
         std::fs::create_dir_all(parent)
             .change_context(ConfigError::FileWriteError)
-            .attach_printable("Unable to create tms config folder")?;
+            .attach("Unable to create tms config folder")?;
         let mut file = std::fs::File::create(path).change_context(ConfigError::FileWriteError)?;
         file.write_all(&toml_pretty)
             .change_context(ConfigError::FileWriteError)?;
@@ -221,7 +221,7 @@ impl Config {
             && self.search_paths.as_ref().is_none_or(Vec::is_empty)
         {
             return Err(ConfigError::NoDefaultSearchPath)
-            .attach_printable(
+            .attach(
                 "You must configure at least one default search path with the `config` subcommand. E.g `tms config` ",
             );
         }
@@ -257,7 +257,7 @@ impl Config {
 
         if search_dirs.is_empty() {
             return Err(ConfigError::NoValidSearchPath)
-            .attach_printable(
+            .attach(
                 "You must configure at least one valid search path with the `config` subcommand. E.g `tms config` "
             );
         }

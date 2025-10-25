@@ -1,5 +1,5 @@
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
-use error_stack::{report, Report, ResultExt};
+use error_stack::{IntoReport, Report, ResultExt};
 use gix::{Repository, Submodule};
 use jj_lib::{
     config::StackedConfig,
@@ -326,7 +326,7 @@ pub async fn find_repos(config: &Config) -> Result<BTreeMap<String, Vec<Session>
             .path
             .file_name()
             .ok_or_else(|| {
-                Report::new(TmsError::GitError).attach_printable("Not a valid repository name")
+                Report::new(TmsError::GitError).attach("Not a valid repository name")
             })?
             .to_string()?;
 
@@ -580,9 +580,9 @@ async fn search_dirs_streaming(
                             }
                             Err(e) => {
                                 trace_log!("Error reading directory {:?}: {}", file.path, e);
-                                Err(report!(e)
+                                Err(e.into_report()
                                     .change_context(TmsError::IoError)
-                                    .attach_printable(format!("Could not read directory {:?}", file.path)))
+                                    .attach(format!("Could not read directory {:?}", file.path)))
                             }
                             Ok(mut read_dir) => {
                                 let mut subdirs = Vec::with_capacity(128); // Increased capacity
@@ -897,9 +897,9 @@ where
                                 }
                                 Err(e) => {
                                     trace_log!("Error reading directory {:?}: {}", file.path, e);
-                                    Err(report!(e)
+                                    Err(e.into_report()
                                         .change_context(TmsError::IoError)
-                                        .attach_printable(format!("Could not read directory {:?}", file.path)))
+                                        .attach(format!("Could not read directory {:?}", file.path)))
                                 }
                                 Ok(mut read_dir) => {
                                     let mut subdirs = Vec::with_capacity(128); // Increased capacity
@@ -1044,7 +1044,7 @@ pub fn find_submodules<'a>(
         let submodule_file_name = path
             .file_name()
             .ok_or_else(|| {
-                Report::new(TmsError::GitError).attach_printable("Not a valid submodule name")
+                Report::new(TmsError::GitError).attach("Not a valid submodule name")
             })?
             .to_string()?;
         let session_name = format!("{}>{}", parent_name, submodule_file_name);

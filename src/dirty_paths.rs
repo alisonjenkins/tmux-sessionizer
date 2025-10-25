@@ -34,7 +34,7 @@ impl DirtyUtf8Path for std::path::PathBuf {
         let path_str = self
             .to_str()
             .ok_or(TmsError::NonUtf8Path)
-            .attach_printable("Not a valid utf8 path")?
+            .attach("Not a valid utf8 path")?
             .to_string();
         Ok(normalize_path(&path_str))
     }
@@ -44,7 +44,7 @@ impl DirtyUtf8Path for std::path::Path {
         let path_str = self
             .to_str()
             .ok_or(TmsError::NonUtf8Path)
-            .attach_printable("Not a valid utf8 path")?
+            .attach("Not a valid utf8 path")?
             .to_string();
         Ok(normalize_path(&path_str))
     }
@@ -54,7 +54,7 @@ impl DirtyUtf8Path for std::ffi::OsStr {
         let path_str = self
             .to_str()
             .ok_or(TmsError::NonUtf8Path)
-            .attach_printable("Not a valid utf8 path")?
+            .attach("Not a valid utf8 path")?
             .to_string();
         Ok(normalize_path(&path_str))
     }

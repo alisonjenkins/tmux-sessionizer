@@ -1,6 +1,6 @@
 use std::{error::Error, fmt::Display};
 
-pub type Result<T> = error_stack::Result<T, TmsError>;
+pub type Result<T> = core::result::Result<T, error_stack::Report<TmsError>>;
 
 #[derive(Debug)]
 pub enum TmsError {

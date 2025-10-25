@@ -692,7 +692,7 @@ async fn pick_search_path(config: &Config, tmux: &Tmux) -> Result<Option<PathBuf
         .search_dirs
         .as_ref()
         .ok_or(TmsError::ConfigError)
-        .attach_printable("No search path configured")?
+        .attach("No search path configured")?
         .iter()
         .filter(|dir| dir.depth > 0)
         .map(|dir| dir.path.to_string())
@@ -705,7 +705,7 @@ async fn pick_search_path(config: &Config, tmux: &Tmux) -> Result<Option<PathBuf
         let first = search_dirs
             .first()
             .ok_or(TmsError::ConfigError)
-            .attach_printable("No search path configured")?;
+            .attach("No search path configured")?;
         Some(first.clone())
     };
 

@@ -133,7 +133,7 @@ async fn open(index: usize, config: &Config, tmux: &Tmux) -> Result<()> {
         .as_ref()
         .and_then(|items| items.get(&index.to_string()))
         .ok_or(TmsError::ConfigError)
-        .attach_printable(format!("Session with index {} not found in marks", index))?;
+        .attach(format!("Session with index {} not found in marks", index))?;
 
     let session = path_to_session(path)?;
 
