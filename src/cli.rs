@@ -184,7 +184,7 @@ pub struct OpenSessionCommand {
 }
 
 impl Cli {
-    pub fn handle_sub_commands(&self, tmux: &Tmux) -> Result<SubCommandGiven> {
+    pub async fn handle_sub_commands(&self, tmux: &Tmux) -> Result<SubCommandGiven> {
         // Get the configuration from the config file
         let config = Config::new().change_context(TmsError::ConfigError)?;
 
@@ -195,12 +195,12 @@ impl Cli {
             }
 
             Some(CliCommand::Switch) => {
-                switch_command(config, tmux)?;
+                switch_command(config, tmux).await?;
                 Ok(SubCommandGiven::Yes)
             }
 
             Some(CliCommand::Windows) => {
-                windows_command(&config, tmux)?;
+                windows_command(&config, tmux).await?;
                 Ok(SubCommandGiven::Yes)
             }
             // Handle the config subcommand
@@ -234,12 +234,12 @@ impl Cli {
             }
 
             Some(CliCommand::CloneRepo(args)) => {
-                clone_repo_command(args, config, tmux)?;
+                clone_repo_command(args, config, tmux).await?;
                 Ok(SubCommandGiven::Yes)
             }
 
             Some(CliCommand::InitRepo(args)) => {
-                init_repo_command(args, config, tmux)?;
+                init_repo_command(args, config, tmux).await?;
                 Ok(SubCommandGiven::Yes)
             }
 
@@ -301,7 +301,7 @@ fn start_command(config: Config, tmux: &Tmux) -> Result<()> {
     Ok(())
 }
 
-fn switch_command(mut config: Config, tmux: &Tmux) -> Result<()> {
+async fn switch_command(mut config: Config, tmux: &Tmux) -> Result<()> {
     let sessions = tmux
         .list_sessions("'#{?session_attached,,#{session_name}#,#{session_last_attached}}'")
         .replace('\'', "")
@@ -334,7 +334,7 @@ fn switch_command(mut config: Config, tmux: &Tmux) -> Result<()> {
     }
 
     if let Some(target_session) =
-        get_single_selection(&sessions, Some(Preview::SessionPane), &config, tmux)?
+        get_single_selection(&sessions, Some(Preview::SessionPane), &config, tmux).await?
     {
         // Update frecency data for the selected session
         config.update_session_frecency(&target_session);
@@ -346,7 +346,7 @@ fn switch_command(mut config: Config, tmux: &Tmux) -> Result<()> {
     Ok(())
 }
 
-fn windows_command(config: &Config, tmux: &Tmux) -> Result<()> {
+async fn windows_command(config: &Config, tmux: &Tmux) -> Result<()> {
     let windows = tmux.list_windows("'#{?window_attached,,#{window_id} #{window_name}}'", None);
 
     let windows: Vec<String> = windows
@@ -358,7 +358,7 @@ fn windows_command(config: &Config, tmux: &Tmux) -> Result<()> {
         .collect();
 
     if let Some(target_window) =
-        get_single_selection(&windows, Some(Preview::WindowPane), config, tmux)?
+        get_single_selection(&windows, Some(Preview::WindowPane), config, tmux).await?
     {
         if let Some((windex, _)) = target_window.split_once(' ') {
             tmux.select_window(windex);
@@ -687,7 +687,7 @@ fn refresh_command(args: &RefreshCommand, config: Config, tmux: &Tmux) -> Result
     Ok(())
 }
 
-fn pick_search_path(config: &Config, tmux: &Tmux) -> Result<Option<PathBuf>> {
+async fn pick_search_path(config: &Config, tmux: &Tmux) -> Result<Option<PathBuf>> {
     let search_dirs = config
         .search_dirs
         .as_ref()
@@ -700,7 +700,7 @@ fn pick_search_path(config: &Config, tmux: &Tmux) -> Result<Option<PathBuf>> {
         .collect::<Vec<String>>();
 
     let path = if search_dirs.len() > 1 {
-        get_single_selection(&search_dirs, Some(Preview::Directory), config, tmux)?
+        get_single_selection(&search_dirs, Some(Preview::Directory), config, tmux).await?
     } else {
         let first = search_dirs
             .first()
@@ -717,8 +717,8 @@ fn pick_search_path(config: &Config, tmux: &Tmux) -> Result<Option<PathBuf>> {
     Ok(expanded)
 }
 
-fn clone_repo_command(args: &CloneRepoCommand, config: Config, tmux: &Tmux) -> Result<()> {
-    let Some(mut path) = pick_search_path(&config, tmux)? else {
+async fn clone_repo_command(args: &CloneRepoCommand, config: Config, tmux: &Tmux) -> Result<()> {
+    let Some(mut path) = pick_search_path(&config, tmux).await? else {
         return Ok(());
     };
 
@@ -779,8 +779,8 @@ fn git_clone<'a>(repo: &str, target: &'a Path) -> Result<&'a Path> {
     Ok(target)
 }
 
-fn init_repo_command(args: &InitRepoCommand, config: Config, tmux: &Tmux) -> Result<()> {
-    let Some(mut path) = pick_search_path(&config, tmux)? else {
+async fn init_repo_command(args: &InitRepoCommand, config: Config, tmux: &Tmux) -> Result<()> {
+    let Some(mut path) = pick_search_path(&config, tmux).await? else {
         return Ok(());
     };
     path.push(&args.repository);

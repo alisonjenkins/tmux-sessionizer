@@ -395,4 +395,8 @@ pub enum PickerAction {
     MoveToLineStart,
     #[serde(rename = "move_to_line_end")]
     MoveToLineEnd,
+    #[serde(rename = "switch_mode")]
+    SwitchMode,
+    #[serde(rename = "refresh")]
+    Refresh,
 }

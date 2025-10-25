@@ -2,11 +2,13 @@ pub mod cli;
 pub mod configs;
 pub mod dirty_paths;
 pub mod error;
+pub mod github;
 pub mod keymap;
 pub mod marks;
 pub mod picker;
 pub mod repos;
 pub mod session;
+pub mod state;
 pub mod tmux;
 
 use configs::Config;
@@ -27,7 +29,7 @@ pub fn execute_command(command: &str, args: Vec<String>) -> process::Output {
         .unwrap_or_else(|_| panic!("Failed to execute command `{command}`"))
 }
 
-pub fn get_single_selection(
+pub async fn get_single_selection(
     list: &[String],
     preview: Option<Preview>,
     config: &Config,
@@ -39,14 +41,15 @@ pub fn get_single_selection(
         config.shortcuts.as_ref(),
         config.input_position.unwrap_or_default(),
         tmux,
+        config,
     )
     .set_colors(config.picker_colors.as_ref());
 
-    picker.run()
+    picker.run().await
 }
 
 /// Streaming version that shows a picker and starts scanning in the background
-pub fn get_single_selection_streaming(
+pub async fn get_single_selection_streaming(
     preview: Option<Preview>,
     config: &Config,
     tmux: &Tmux,
@@ -58,8 +61,9 @@ pub fn get_single_selection_streaming(
         config.input_position.unwrap_or_default(),
         tmux,
         receiver,
+        config,
     )
     .set_colors(config.picker_colors.as_ref());
 
-    picker.run()
+    picker.run().await
 }

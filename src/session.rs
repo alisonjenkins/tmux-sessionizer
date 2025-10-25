@@ -23,6 +23,7 @@ pub struct Session {
 pub enum SessionType {
     Git(Box<RepoProvider>),
     Bookmark(PathBuf),
+    GitHub { path: PathBuf, repo_name: String },
 }
 
 impl Session {
@@ -35,6 +36,7 @@ impl Session {
             SessionType::Git(repo) if repo.is_bare() => repo.path(),
             SessionType::Git(repo) => repo.path().parent().unwrap(),
             SessionType::Bookmark(path) => path,
+            SessionType::GitHub { path, .. } => path,
         }
     }
 
@@ -42,6 +44,7 @@ impl Session {
         match &self.session_type {
             SessionType::Git(repo) => self.switch_to_repo_session(repo, tmux, config),
             SessionType::Bookmark(path) => self.switch_to_bookmark_session(tmux, path, config),
+            SessionType::GitHub { path, repo_name } => self.switch_to_github_session(tmux, path, repo_name, config),
         }
     }
 
@@ -74,6 +77,19 @@ impl Session {
     }
 
     fn switch_to_bookmark_session(&self, tmux: &Tmux, path: &Path, config: &Config) -> Result<()> {
+        let session_name = self.name.replace('.', "_");
+
+        if !tmux.session_exists(&session_name) {
+            tmux.new_session(Some(&session_name), path.to_str());
+            tmux.run_session_create_script(path, &session_name, config)?;
+        }
+
+        tmux.switch_to_session(&session_name);
+
+        Ok(())
+    }
+
+    fn switch_to_github_session(&self, tmux: &Tmux, path: &Path, _repo_name: &str, config: &Config) -> Result<()> {
         let session_name = self.name.replace('.', "_");
 
         if !tmux.session_exists(&session_name) {

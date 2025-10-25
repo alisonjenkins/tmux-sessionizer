@@ -70,6 +70,9 @@ fn tms_config() -> anyhow::Result<()> {
         vcs_providers: None,
         session_frecency: None,
         input_position: None,
+        github_profiles: None,
+        picker_switch_mode_key: None,
+        picker_refresh_key: None,
     };
 
     let mut tms = Command::cargo_bin("tms")?;

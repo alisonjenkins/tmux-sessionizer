@@ -1,0 +1,40 @@
+# Example configuration with GitHub profile support
+[[search_dirs]]
+path = "/home/ali/git"
+depth = 6
+
+excluded_dirs = [
+  "node_modules",
+  "target", 
+  "build",
+  "dist",
+  ".cache",
+  "__pycache__",
+  ".venv", 
+  "venv",
+  ".idea",
+  ".vscode"
+]
+
+# GitHub profiles configuration
+[[github_profiles]]
+name = "personal"
+credentials_command = "echo $GITHUB_TOKEN"  # This would normally be something like "gh auth token" or a custom command
+clone_root_path = "~/git/github"
+clone_method = "SSH"  # or "HTTPS"
+
+[[github_profiles]]
+name = "work"
+credentials_command = "cat ~/.config/gh/work_token"  # Example of reading from a file
+clone_root_path = "~/git/work"
+clone_method = "HTTPS"
+
+# Picker configuration
+picker_switch_mode_key = "tab"  # Default key to switch between modes
+picker_refresh_key = "f5"       # Default key to refresh current mode
+
+# Other existing configuration...
+display_full_path = false
+search_submodules = false
+recursive_submodules = false
+session_sort_order = "Frecency"

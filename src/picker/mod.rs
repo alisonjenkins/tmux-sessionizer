@@ -22,8 +22,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::{
-    configs::PickerColorConfig,
+    configs::{PickerColorConfig, Config},
+    github::GitHubClient,
     keymap::{Keymap, PickerAction},
+    state::StateManager,
     tmux::Tmux,
     Result, TmsError,
 };
@@ -41,6 +43,21 @@ pub enum InputPosition {
     Bottom,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerMode {
+    Local,
+    GitHub(String), // profile name
+}
+
+impl PickerMode {
+    pub fn display_name(&self) -> String {
+        match self {
+            PickerMode::Local => "Local repos".to_string(),
+            PickerMode::GitHub(profile_name) => format!("Github - {}", profile_name),
+        }
+    }
+}
+
 pub struct Picker<'a> {
     matcher: Nucleo<String>,
     preview: Option<Preview>,
@@ -54,6 +71,12 @@ pub struct Picker<'a> {
     page_size: usize,
     receiver: Option<mpsc::UnboundedReceiver<String>>,
     total_items_added: usize,
+    // GitHub profile support
+    current_mode: PickerMode,
+    available_modes: Vec<PickerMode>,
+    github_client: Option<GitHubClient>,
+    state_manager: Option<StateManager>,
+    config: &'a Config,
 }
 
 impl<'a> Picker<'a> {
@@ -63,6 +86,7 @@ impl<'a> Picker<'a> {
         keymap: Option<&Keymap>,
         input_position: InputPosition,
         tmux: &'a Tmux,
+        config: &'a Config,
     ) -> Self {
         let matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
 
@@ -78,6 +102,39 @@ impl<'a> Picker<'a> {
             Keymap::default()
         };
 
+        // Setup available modes
+        let mut available_modes = vec![PickerMode::Local];
+        
+        // Add GitHub profiles as modes
+        for profile in config.get_github_profiles() {
+            available_modes.push(PickerMode::GitHub(profile.name));
+        }
+
+        // Determine initial mode based on saved active profile
+        let (current_mode, state_manager) = if let Ok(state_manager) = StateManager::new() {
+            let active_profile = state_manager.get_active_profile().unwrap_or_default();
+            let current_mode = if let Some(active_profile) = active_profile {
+                if let Some(mode) = available_modes.iter().find(|mode| {
+                    match mode {
+                        PickerMode::Local => active_profile == "local",
+                        PickerMode::GitHub(name) => name == &active_profile,
+                    }
+                }) {
+                    mode.clone()
+                } else {
+                    PickerMode::Local
+                }
+            } else {
+                PickerMode::Local
+            };
+            (current_mode, Some(state_manager))
+        } else {
+            (PickerMode::Local, None)
+        };
+
+        // Try to create GitHub client
+        let github_client = GitHubClient::new().ok();
+
         Picker {
             matcher,
             preview,
@@ -91,6 +148,11 @@ impl<'a> Picker<'a> {
             page_size: 10, // Default page size, will be updated during render
             receiver: None,
             total_items_added: list.len(),
+            current_mode,
+            available_modes,
+            github_client,
+            state_manager,
+            config,
         }
     }
 
@@ -101,6 +163,7 @@ impl<'a> Picker<'a> {
         input_position: InputPosition,
         tmux: &'a Tmux,
         receiver: mpsc::UnboundedReceiver<String>,
+        config: &'a Config,
     ) -> Self {
         let matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
 
@@ -109,6 +172,39 @@ impl<'a> Picker<'a> {
         } else {
             Keymap::default()
         };
+
+        // Setup available modes
+        let mut available_modes = vec![PickerMode::Local];
+        
+        // Add GitHub profiles as modes
+        for profile in config.get_github_profiles() {
+            available_modes.push(PickerMode::GitHub(profile.name));
+        }
+
+        // Determine initial mode based on saved active profile
+        let (current_mode, state_manager) = if let Ok(state_manager) = StateManager::new() {
+            let active_profile = state_manager.get_active_profile().unwrap_or_default();
+            let current_mode = if let Some(active_profile) = active_profile {
+                if let Some(mode) = available_modes.iter().find(|mode| {
+                    match mode {
+                        PickerMode::Local => active_profile == "local",
+                        PickerMode::GitHub(name) => name == &active_profile,
+                    }
+                }) {
+                    mode.clone()
+                } else {
+                    PickerMode::Local
+                }
+            } else {
+                PickerMode::Local
+            };
+            (current_mode, Some(state_manager))
+        } else {
+            (PickerMode::Local, None)
+        };
+
+        // Try to create GitHub client
+        let github_client = GitHubClient::new().ok();
 
         Picker {
             matcher,
@@ -123,6 +219,11 @@ impl<'a> Picker<'a> {
             page_size: 10,
             receiver: Some(receiver),
             total_items_added: 0,
+            current_mode,
+            available_modes,
+            github_client,
+            state_manager,
+            config,
         }
     }
 
@@ -132,7 +233,7 @@ impl<'a> Picker<'a> {
         self
     }
 
-    pub fn run(&mut self) -> Result<Option<String>> {
+    pub async fn run(&mut self) -> Result<Option<String>> {
         // Handle cases where no TTY is available (like in Nix sandbox or CI)
         // We need to check for TTY availability before initializing ratatui
         use std::io::IsTerminal;
@@ -145,7 +246,8 @@ impl<'a> Picker<'a> {
         let mut terminal = ratatui::init();
 
         let selected_str = self
-            .main_loop(&mut terminal)
+            .async_main_loop(&mut terminal)
+            .await
             .map_err(|e| TmsError::TuiError(e.to_string()));
 
         ratatui::restore();
@@ -153,7 +255,13 @@ impl<'a> Picker<'a> {
         Ok(selected_str?)
     }
 
-    fn main_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
+    async fn async_main_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<String>> {
+        // Load initial data for the current mode if it's a GitHub profile
+        if matches!(self.current_mode, PickerMode::GitHub(_)) {
+            if let Err(e) = self.refresh_current_mode().await {
+                eprintln!("Warning: Error loading initial GitHub repositories: {}", e);
+            }
+        }
         loop {
             self.matcher.tick(1000);
             
@@ -183,12 +291,35 @@ impl<'a> Picker<'a> {
                 true => {
                     if let Event::Key(key) = event::read().map_err(|e| TmsError::TuiError(e.to_string()))? {
                         if key.kind == KeyEventKind::Press {
+                            // Check for mode switching key
+                            let switch_key = &self.config.get_picker_switch_mode_key();
+                            let refresh_key = &self.config.get_picker_refresh_key();
+                            
+                            if key.code == KeyCode::Tab && switch_key == "tab" {
+                                self.switch_to_next_mode();
+                                // Load data for the new mode
+                                if let Err(e) = self.refresh_current_mode().await {
+                                    eprintln!("Error loading data for mode: {}", e);
+                                }
+                                continue;
+                            } else if key.code == KeyCode::F(5) && refresh_key == "f5" {
+                                self.refresh_current_mode().await?;
+                                continue;
+                            }
+                            
                             match self.keymap.0.get(&key.into()) {
                                 Some(PickerAction::Cancel) => return Ok(None),
                                 Some(PickerAction::Confirm) => {
                                     if let Some(selected) = self.get_selected() {
-                                        return Ok(Some(selected.to_owned()));
+                                        let selected = selected.to_owned();
+                                        return self.handle_selection(&selected).await;
                                     }
+                                }
+                                Some(PickerAction::SwitchMode) => {
+                                    self.switch_to_next_mode();
+                                }
+                                Some(PickerAction::Refresh) => {
+                                    self.refresh_current_mode().await?;
                                 }
                                 Some(PickerAction::Backspace) => self.remove_filter(),
                                 Some(PickerAction::Delete) => self.delete(),
@@ -322,13 +453,15 @@ impl<'a> Picker<'a> {
                     .title_position(title_position)
                     .title(if self.receiver.is_some() {
                         format!(
-                            "🔍 {}/{} (scanning...)",
+                            "{} - 🔍 {}/{} (scanning...)",
+                            self.current_mode.display_name(),
                             snapshot.matched_item_count(),
                             snapshot.item_count()
                         )
                     } else {
                         format!(
-                            "{}/{}",
+                            "{} - {}/{}",
+                            self.current_mode.display_name(),
                             snapshot.matched_item_count(),
                             snapshot.item_count()
                         )
@@ -604,6 +737,129 @@ impl<'a> Picker<'a> {
 
     fn move_to_end(&mut self) {
         self.cursor_pos = u16::try_from(self.filter.len()).unwrap_or_default();
+    }
+
+    fn switch_to_next_mode(&mut self) {
+        if self.available_modes.len() <= 1 {
+            return;
+        }
+
+        let current_index = self.available_modes.iter()
+            .position(|mode| mode == &self.current_mode)
+            .unwrap_or(0);
+        
+        let next_index = (current_index + 1) % self.available_modes.len();
+        self.current_mode = self.available_modes[next_index].clone();
+        
+        // Clear current items and reset selection
+        self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+        self.selection = ListState::default();
+        self.total_items_added = 0;
+        
+        // We'll load items for the new mode in the main loop via refresh_current_mode
+    }
+
+    async fn refresh_current_mode(&mut self) -> Result<()> {
+        match &self.current_mode {
+            PickerMode::Local => {
+                // For local mode, we don't need to do anything special since
+                // the streaming should handle local repositories
+                // This could be extended to re-scan local directories
+            }
+            PickerMode::GitHub(profile_name) => {
+                if let Some(ref github_client) = self.github_client {
+                    if let Some(profile) = self.config.get_github_profiles().iter()
+                        .find(|p| &p.name == profile_name) {
+                        
+                        match github_client.get_repositories(profile, true).await {
+                            Ok(repos) => {
+                                // Clear current matcher and add GitHub repos
+                                self.matcher = Nucleo::new(nucleo::Config::DEFAULT, Arc::new(request_redraw), None, 1);
+                                let injector = self.matcher.injector();
+                                
+                                let repo_count = repos.len();
+                                for repo in &repos {
+                                    let display_name = format!("{} - {}", repo.name, 
+                                        repo.description.as_deref().unwrap_or("No description"));
+                                    injector.push(display_name.clone(), |_, dst| dst[0] = display_name.into());
+                                }
+                                
+                                self.total_items_added = repo_count;
+                                self.selection = ListState::default();
+                            }
+                            Err(e) => {
+                                eprintln!("Error refreshing GitHub profile '{}': {}", profile_name, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_selection(&mut self, selected: &str) -> Result<Option<String>> {
+        match &self.current_mode {
+            PickerMode::Local => {
+                // Save current active profile
+                if let Some(ref state_manager) = self.state_manager {
+                    let _ = state_manager.set_active_profile(Some("local".to_string()));
+                }
+                
+                Ok(Some(selected.to_owned()))
+            }
+            PickerMode::GitHub(profile_name) => {
+                // Save current active profile
+                if let Some(ref state_manager) = self.state_manager {
+                    let _ = state_manager.set_active_profile(Some(profile_name.clone()));
+                }
+
+                if let Some(ref github_client) = self.github_client {
+                    if let Some(profile) = self.config.get_github_profiles().iter()
+                        .find(|p| &p.name == profile_name) {
+                        
+                        // Extract repo name from the selected display string
+                        let repo_name = selected.split(" - ").next().unwrap_or(selected);
+                        
+                        // Get the repository details
+                        match github_client.get_repositories(profile, false).await {
+                            Ok(repos) => {
+                                if let Some(repo) = repos.iter().find(|r| r.name == repo_name) {
+                                    // Get clone root path
+                                    let clone_root = crate::github::expand_clone_root_path(&profile.clone_root_path)?;
+                                    
+                                    // Clone the repository
+                                    match github_client.clone_repository(repo, profile, &clone_root).await {
+                                        Ok(repo_path) => {
+                                            // Create a special marker for GitHub repos
+                                            // We'll return a special format that indicates this is a GitHub repo
+                                            Ok(Some(format!("github:{}", repo_path.to_string_lossy())))
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Error cloning repository: {}", e);
+                                            Err(e)
+                                        }
+                                    }
+                                } else {
+                                    eprintln!("Repository '{}' not found in profile", repo_name);
+                                    Ok(None)
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error getting repositories: {}", e);
+                                Err(e)
+                            }
+                        }
+                    } else {
+                        eprintln!("GitHub profile '{}' not found", profile_name);
+                        Ok(None)
+                    }
+                } else {
+                    eprintln!("GitHub client not available");
+                    Ok(None)
+                }
+            }
+        }
     }
 }
 

@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
 
     // Handle sub-commands first, which includes config validation
     // If this fails, the error should be properly propagated without reaching streaming code
-    let mut config = match cli_args.handle_sub_commands(&tmux) {
+    let mut config = match cli_args.handle_sub_commands(&tmux).await {
         Ok(SubCommandGiven::Yes) => return Ok(()),
         Ok(SubCommandGiven::No(config)) => *config, // continue with valid config
         Err(e) => {
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         &config,
         &tmux,
         receiver,
-    ) {
+    ).await {
         Ok(Some(str)) => str,
         Ok(None) => return Ok(()), // User cancelled
         Err(e) => {
@@ -93,7 +93,36 @@ async fn main() -> Result<()> {
     // Look up the actual session object to get proper path handling
     match sessions_map.lock() {
         Ok(sessions) => {
-            if let Some(session) = sessions.get(&selected_str) {
+            // Check if this is a GitHub repository selection
+            if selected_str.starts_with("github:") {
+                let repo_path = &selected_str[7..]; // Remove "github:" prefix
+                let repo_name = std::path::Path::new(repo_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                
+                // Create a GitHub session
+                let github_session = tms::session::Session::new(
+                    repo_name.clone(),
+                    tms::session::SessionType::GitHub {
+                        path: std::path::PathBuf::from(repo_path),
+                        repo_name: repo_name.clone(),
+                    }
+                );
+                
+                // Update frecency data for this session
+                config.update_session_frecency(&repo_name);
+                
+                // Save the config with updated frecency data (ignore errors to not interrupt workflow)
+                let _ = config.save();
+                
+                // Switch to the GitHub session
+                if let Err(e) = github_session.switch_to(&tmux, &config) {
+                    eprintln!("Error switching to GitHub session: {}", e);
+                    std::process::exit(1);
+                }
+            } else if let Some(session) = sessions.get(&selected_str) {
                 // Update frecency data for this session
                 config.update_session_frecency(&session.name);
                 

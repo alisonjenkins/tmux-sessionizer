@@ -55,6 +55,9 @@ pub struct Config {
     pub clone_repo_switch: Option<CloneRepoSwitchConfig>,
     pub vcs_providers: Option<Vec<VcsProviders>>,
     pub session_frecency: Option<HashMap<String, SessionFrecencyData>>,
+    pub github_profiles: Option<Vec<GitHubProfile>>,
+    pub picker_switch_mode_key: Option<String>, // default: "tab"
+    pub picker_refresh_key: Option<String>, // default: "f5"
 }
 
 pub const DEFAULT_VCS_PROVIDERS: &[VcsProviders] = &[VcsProviders::Git];
@@ -86,6 +89,9 @@ pub struct ConfigExport {
     pub clone_repo_switch: CloneRepoSwitchConfig,
     pub vcs_providers: Vec<VcsProviders>,
     pub session_frecency: HashMap<String, SessionFrecencyData>,
+    pub github_profiles: Vec<GitHubProfile>,
+    pub picker_switch_mode_key: String,
+    pub picker_refresh_key: String,
 }
 
 impl From<Config> for ConfigExport {
@@ -114,6 +120,9 @@ impl From<Config> for ConfigExport {
             clone_repo_switch: value.clone_repo_switch.unwrap_or_default(),
             vcs_providers: value.vcs_providers.unwrap_or(DEFAULT_VCS_PROVIDERS.into()),
             session_frecency: value.session_frecency.unwrap_or_default(),
+            github_profiles: value.github_profiles.unwrap_or_default(),
+            picker_switch_mode_key: value.picker_switch_mode_key.unwrap_or_else(|| "tab".to_string()),
+            picker_refresh_key: value.picker_refresh_key.unwrap_or_else(|| "f5".to_string()),
         }
     }
 }
@@ -346,6 +355,20 @@ impl Config {
             .and_then(|frecency| frecency.get(session_name))
             .map(|data| data.frecency_score())
             .unwrap_or(0.0)
+    }
+
+    pub fn get_github_profiles(&self) -> Vec<GitHubProfile> {
+        self.github_profiles.clone().unwrap_or_default()
+    }
+
+
+
+    pub fn get_picker_switch_mode_key(&self) -> String {
+        self.picker_switch_mode_key.clone().unwrap_or_else(|| "tab".to_string())
+    }
+
+    pub fn get_picker_refresh_key(&self) -> String {
+        self.picker_refresh_key.clone().unwrap_or_else(|| "f5".to_string())
     }
 }
 
@@ -639,40 +662,79 @@ mod tests {
 
     #[test]
     fn test_search_dirs_deduplication() {
+        use tempfile::TempDir;
+        
+        // Create temporary directories for testing
+        let temp_dir = TempDir::new().unwrap();
+        let test_path = temp_dir.path().join("test");
+        let other_path = temp_dir.path().join("other");
+        
+        std::fs::create_dir_all(&test_path).unwrap();
+        std::fs::create_dir_all(&other_path).unwrap();
+        
         // Create a config with duplicate search directories
         let mut config = Config::default();
         config.search_dirs = Some(vec![
-            SearchDirectory::new("/tmp/test".into(), 5),
-            SearchDirectory::new("/tmp/test".into(), 10), // Same path, different depth
-            SearchDirectory::new("/tmp/other".into(), 5),
-            SearchDirectory::new("/tmp/test".into(), 3),  // Same path again, lower depth
+            SearchDirectory::new(test_path.clone(), 5),
+            SearchDirectory::new(test_path.clone(), 10), // Same path, different depth
+            SearchDirectory::new(other_path.clone(), 5),
+            SearchDirectory::new(test_path.clone(), 3),  // Same path again, lower depth
         ]);
-        
-        // For this test, we need to create the directories temporarily
-        std::fs::create_dir_all("/tmp/test").ok();
-        std::fs::create_dir_all("/tmp/other").ok();
         
         let search_dirs = config.search_dirs().unwrap();
         
         // Should have only 2 unique paths
         assert_eq!(search_dirs.len(), 2, "Should deduplicate paths and have only 2 unique directories");
         
-        // Find the /tmp/test entry
-        let test_dir = search_dirs.iter().find(|d| d.path.ends_with("test")).unwrap();
+        // Find the test entry
+        let test_dir = search_dirs.iter().find(|d| d.path == test_path).unwrap();
         // Should keep the highest depth (10)
         assert_eq!(test_dir.depth, 10, "Should keep the directory entry with the highest depth");
         
-        // Find the /tmp/other entry
-        let other_dir = search_dirs.iter().find(|d| d.path.ends_with("other")).unwrap();
+        // Find the other entry
+        let other_dir = search_dirs.iter().find(|d| d.path == other_path).unwrap();
         assert_eq!(other_dir.depth, 5, "Other directory should have original depth");
-        
-        // Cleanup
-        std::fs::remove_dir_all("/tmp/test").ok();
-        std::fs::remove_dir_all("/tmp/other").ok();
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
     pub create_script: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct GitHubProfile {
+    pub name: String,
+    pub credentials_command: String,
+    pub clone_root_path: String,
+    pub clone_method: Option<GitHubCloneMethod>, // defaults to SSH
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum GitHubCloneMethod {
+    SSH,
+    HTTPS,
+}
+
+impl Default for GitHubCloneMethod {
+    fn default() -> Self {
+        GitHubCloneMethod::SSH
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct GitHubRepoCache {
+    pub profile_name: String,
+    pub repositories: Vec<GitHubRepo>,
+    pub cached_at: u64, // Unix timestamp
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct GitHubRepo {
+    pub name: String,
+    pub full_name: String,
+    pub clone_url_ssh: String,
+    pub clone_url_https: String,
+    pub description: Option<String>,
+    pub updated_at: String,
 }
