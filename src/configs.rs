@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use error_stack::ResultExt;
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, env, fmt::Display, fs::canonicalize, io::Write, path::PathBuf};
+use std::{collections::HashMap, env, fmt::Display, fs::canonicalize, io::Write, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
 use ratatui::style::{Color, Style, Stylize};
 
@@ -54,6 +54,7 @@ pub struct Config {
     pub marks: Option<HashMap<String, String>>,
     pub clone_repo_switch: Option<CloneRepoSwitchConfig>,
     pub vcs_providers: Option<Vec<VcsProviders>>,
+    pub session_frecency: Option<HashMap<String, SessionFrecencyData>>,
 }
 
 pub const DEFAULT_VCS_PROVIDERS: &[VcsProviders] = &[VcsProviders::Git];
@@ -84,6 +85,7 @@ pub struct ConfigExport {
     pub marks: HashMap<String, String>,
     pub clone_repo_switch: CloneRepoSwitchConfig,
     pub vcs_providers: Vec<VcsProviders>,
+    pub session_frecency: HashMap<String, SessionFrecencyData>,
 }
 
 impl From<Config> for ConfigExport {
@@ -111,6 +113,7 @@ impl From<Config> for ConfigExport {
             marks: value.marks.unwrap_or_default(),
             clone_repo_switch: value.clone_repo_switch.unwrap_or_default(),
             vcs_providers: value.vcs_providers.unwrap_or(DEFAULT_VCS_PROVIDERS.into()),
+            session_frecency: value.session_frecency.unwrap_or_default(),
         }
     }
 }
@@ -159,7 +162,7 @@ impl Config {
             .attach_printable("Could not deserialize configuration")
     }
 
-    pub(crate) fn save(&self) -> Result<()> {
+    pub fn save(&self) -> Result<()> {
         let toml_pretty = toml::to_string_pretty(self)
             .change_context(ConfigError::TomlError)?
             .into_bytes();
@@ -307,6 +310,25 @@ impl Config {
     pub fn clear_marks(&mut self) {
         self.marks = None;
     }
+
+    pub fn update_session_frecency(&mut self, session_name: &str) {
+        let session_frecency = self.session_frecency.get_or_insert_with(HashMap::new);
+        
+        match session_frecency.get_mut(session_name) {
+            Some(data) => data.update_access(),
+            None => {
+                session_frecency.insert(session_name.to_string(), SessionFrecencyData::new());
+            }
+        }
+    }
+
+    pub fn get_session_frecency_score(&self, session_name: &str) -> f64 {
+        self.session_frecency
+            .as_ref()
+            .and_then(|frecency| frecency.get(session_name))
+            .map(|data| data.frecency_score())
+            .unwrap_or(0.0)
+    }
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -424,11 +446,12 @@ pub enum SessionSortOrderConfig {
     #[default]
     Alphabetical,
     LastAttached,
+    Frecency,
 }
 
 impl ValueEnum for SessionSortOrderConfig {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Alphabetical, Self::LastAttached]
+        &[Self::Alphabetical, Self::LastAttached, Self::Frecency]
     }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -438,6 +461,9 @@ impl ValueEnum for SessionSortOrderConfig {
             }
             SessionSortOrderConfig::LastAttached => {
                 Some(clap::builder::PossibleValue::new("LastAttached"))
+            }
+            SessionSortOrderConfig::Frecency => {
+                Some(clap::builder::PossibleValue::new("Frecency"))
             }
         }
     }
@@ -464,6 +490,133 @@ impl ValueEnum for CloneRepoSwitchConfig {
                 Some(clap::builder::PossibleValue::new("Foreground"))
             }
         }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SessionFrecencyData {
+    pub access_count: u32,
+    pub last_accessed: u64, // Unix timestamp
+    pub first_accessed: u64, // Unix timestamp
+}
+
+impl SessionFrecencyData {
+    pub fn new() -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        Self {
+            access_count: 1,
+            last_accessed: now,
+            first_accessed: now,
+        }
+    }
+
+    pub fn update_access(&mut self) {
+        self.access_count += 1;
+        self.last_accessed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+    }
+
+    /// Calculate frecency score - higher scores mean more frequent and recent access
+    /// This uses a simple algorithm: frequency * recency_factor
+    /// where recency_factor decays based on time since last access
+    pub fn frecency_score(&self) -> f64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let time_since_last_access = (now - self.last_accessed) as f64;
+        
+        // Recency decay - more recent access gets higher score
+        // Using an exponential decay with a half-life of about 1 week (604800 seconds)
+        let recency_factor = if time_since_last_access > 0.0 {
+            (-time_since_last_access / 604800.0).exp()
+        } else {
+            1.0
+        };
+
+        // Combine frequency and recency
+        (self.access_count as f64) * recency_factor
+    }
+}
+
+impl Default for SessionFrecencyData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_frecency_data_creation() {
+        let data = SessionFrecencyData::new();
+        assert_eq!(data.access_count, 1);
+        assert!(data.last_accessed > 0);
+        assert_eq!(data.first_accessed, data.last_accessed);
+    }
+
+    #[test]
+    fn test_frecency_data_update() {
+        let mut data = SessionFrecencyData::new();
+        let initial_count = data.access_count;
+        let initial_last_accessed = data.last_accessed;
+        
+        // Small sleep to ensure timestamp changes
+        thread::sleep(Duration::from_millis(1));
+        
+        data.update_access();
+        
+        assert_eq!(data.access_count, initial_count + 1);
+        assert!(data.last_accessed >= initial_last_accessed);
+    }
+
+    #[test]
+    fn test_frecency_score_calculation() {
+        let mut data = SessionFrecencyData::new();
+        let initial_score = data.frecency_score();
+        
+        // More frequent access should increase score
+        data.update_access();
+        data.update_access();
+        let higher_score = data.frecency_score();
+        
+        assert!(higher_score > initial_score, 
+                "Higher frequency should result in higher score: {} vs {}", 
+                higher_score, initial_score);
+    }
+
+    #[test]
+    fn test_config_frecency_methods() {
+        let mut config = Config::default();
+        
+        // Test updating session frecency
+        config.update_session_frecency("test_session");
+        
+        let score = config.get_session_frecency_score("test_session");
+        assert!(score > 0.0, "Session should have positive frecency score after access");
+        
+        // Test multiple updates increase score
+        config.update_session_frecency("test_session");
+        let higher_score = config.get_session_frecency_score("test_session");
+        
+        assert!(higher_score > score, 
+                "Multiple accesses should increase frecency score: {} vs {}", 
+                higher_score, score);
+        
+        // Test unknown session has zero score
+        let unknown_score = config.get_session_frecency_score("unknown_session");
+        assert_eq!(unknown_score, 0.0, "Unknown session should have zero frecency score");
     }
 }
 

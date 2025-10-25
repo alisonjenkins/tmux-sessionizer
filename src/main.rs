@@ -43,9 +43,9 @@ async fn main() -> Result<()> {
 
     // Handle sub-commands first, which includes config validation
     // If this fails, the error should be properly propagated without reaching streaming code
-    let config = match cli_args.handle_sub_commands(&tmux) {
+    let mut config = match cli_args.handle_sub_commands(&tmux) {
         Ok(SubCommandGiven::Yes) => return Ok(()),
-        Ok(SubCommandGiven::No(config)) => config, // continue with valid config
+        Ok(SubCommandGiven::No(config)) => *config, // continue with valid config
         Err(e) => {
             // Config error - this should exit with code 1 as expected by tests
             eprintln!("Error: {}", e);
@@ -94,6 +94,12 @@ async fn main() -> Result<()> {
     match sessions_map.lock() {
         Ok(sessions) => {
             if let Some(session) = sessions.get(&selected_str) {
+                // Update frecency data for this session
+                config.update_session_frecency(&session.name);
+                
+                // Save the config with updated frecency data (ignore errors to not interrupt workflow)
+                let _ = config.save();
+                
                 // Use the proper session.switch_to method which handles paths correctly
                 if let Err(e) = session.switch_to(&tmux, &config) {
                     eprintln!("Error switching to session: {}", e);
@@ -109,6 +115,10 @@ async fn main() -> Result<()> {
                     tmux.new_session(Some(&selected_str), None);
                     tmux.switch_to_session(&selected_str);
                 }
+                
+                // Still track this session access for frecency
+                config.update_session_frecency(&selected_str);
+                let _ = config.save();
             }
         }
         Err(e) => {

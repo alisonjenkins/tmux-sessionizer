@@ -62,6 +62,30 @@ a provided `session_name`.
 
 `bind C-r "run-shell 'tms refresh'"`.
 
+### Frecency Support
+
+Tms supports intelligent session sorting using a "frecency" algorithm (frequency + recency). When enabled, sessions that are accessed more frequently and recently will be prioritized at the top of the list.
+
+To enable frecency sorting:
+
+```bash
+tms config --session-sort-order Frecency
+```
+
+The frecency algorithm considers:
+- **Frequency**: How often you access a session
+- **Recency**: How recently you accessed a session
+- **Time decay**: Recent access has more weight than older access
+
+Sessions are scored using an exponential decay function with a half-life of approximately one week. This means that a session accessed yesterday will have higher priority than one accessed a week ago, even if the older session was accessed more times overall.
+
+Available sort orders:
+- `Alphabetical` (default): Sort sessions alphabetically by name
+- `LastAttached`: Sort tmux sessions by last attachment time (for switch command only)
+- `Frecency`: Sort by intelligent frequency + recency scoring
+
+Session usage is automatically tracked and persisted in the tms configuration file. No manual intervention is required once frecency sorting is enabled.
+
 ### CLI overview
 
 Use `tms --help`
@@ -129,7 +153,7 @@ Options:
       --picker-prompt-color <#rrggbb>
           Color of the prompt in the picker
       --session-sort-order <Alphabetical | LastAttach>
-          Set the sort order of the sessions in the switch command [possible values: Alphabetical, LastAttached]
+          Set the sort order of the sessions in the switch command [possible values: Alphabetical, LastAttached, Frecency]
   -h, --help
           Print help
 ```

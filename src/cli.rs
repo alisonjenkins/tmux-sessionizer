@@ -131,7 +131,7 @@ pub struct ConfigArgs {
     #[arg(long, value_name = "#rrggbb")]
     /// Color of the prompt in the picker
     picker_prompt_color: Option<Color>,
-    #[arg(long, value_name = "Alphabetical | LastAttached")]
+    #[arg(long, value_name = "Alphabetical | LastAttached | Frecency")]
     /// Set the sort order of the sessions in the switch command
     session_sort_order: Option<SessionSortOrderConfig>,
     #[arg(long, value_name = "Always | Never | Foreground", verbatim_doc_comment)]
@@ -301,7 +301,7 @@ fn start_command(config: Config, tmux: &Tmux) -> Result<()> {
     Ok(())
 }
 
-fn switch_command(config: Config, tmux: &Tmux) -> Result<()> {
+fn switch_command(mut config: Config, tmux: &Tmux) -> Result<()> {
     let sessions = tmux
         .list_sessions("'#{?session_attached,,#{session_name}#,#{session_last_attached}}'")
         .replace('\'', "")
@@ -315,6 +315,12 @@ fn switch_command(config: Config, tmux: &Tmux) -> Result<()> {
 
     if let Some(SessionSortOrderConfig::LastAttached) = config.session_sort_order {
         sessions.sort_by(|a, b| b.1.cmp(a.1));
+    } else if let Some(SessionSortOrderConfig::Frecency) = config.session_sort_order {
+        sessions.sort_by(|a, b| {
+            let score_a = config.get_session_frecency_score(a.0);
+            let score_b = config.get_session_frecency_score(b.0);
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     let mut sessions: Vec<String> = sessions.into_iter().map(|s| s.0.to_string()).collect();
@@ -330,6 +336,10 @@ fn switch_command(config: Config, tmux: &Tmux) -> Result<()> {
     if let Some(target_session) =
         get_single_selection(&sessions, Some(Preview::SessionPane), &config, tmux)?
     {
+        // Update frecency data for the selected session
+        config.update_session_frecency(&target_session);
+        let _ = config.save();
+        
         tmux.switch_client(&target_session.replace('.', "_"));
     }
 
@@ -507,6 +517,12 @@ fn kill_subcommand(config: Config, tmux: &Tmux) -> Result<()> {
 
     if let Some(SessionSortOrderConfig::LastAttached) = config.session_sort_order {
         sessions.sort_by(|a, b| b.1.cmp(a.1));
+    } else if let Some(SessionSortOrderConfig::Frecency) = config.session_sort_order {
+        sessions.sort_by(|a, b| {
+            let score_a = config.get_session_frecency_score(a.0);
+            let score_b = config.get_session_frecency_score(b.0);
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     let to_session = if config.default_session.is_some()

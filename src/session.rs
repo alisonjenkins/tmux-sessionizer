@@ -7,7 +7,7 @@ use error_stack::ResultExt;
 use tokio::sync::mpsc;
 
 use crate::{
-    configs::Config,
+    configs::{Config, SessionSortOrderConfig},
     dirty_paths::DirtyUtf8Path,
     error::TmsError,
     repos::{find_repos, find_repos_streaming, find_submodules, RepoProvider},
@@ -91,6 +91,7 @@ pub trait SessionContainer {
     fn find_session(&self, name: &str) -> Option<&Session>;
     fn insert_session(&mut self, name: String, repo: Session);
     fn list(&self) -> Vec<String>;
+    fn list_sorted(&self, config: &Config) -> Vec<String>;
 }
 
 impl SessionContainer for BTreeMap<String, Session> {
@@ -106,6 +107,26 @@ impl SessionContainer for BTreeMap<String, Session> {
         // BTreeMap keys are already sorted, so we can just collect them
         self.keys().map(|s| s.to_owned()).collect()
     }
+
+    fn list_sorted(&self, config: &Config) -> Vec<String> {
+        match config.session_sort_order.as_ref().unwrap_or(&SessionSortOrderConfig::Alphabetical) {
+            SessionSortOrderConfig::Alphabetical => self.list(),
+            SessionSortOrderConfig::LastAttached => {
+                // For repository sessions, we don't have tmux last_attached info here,
+                // so fall back to alphabetical for now. This is used mainly for tmux sessions.
+                self.list()
+            }
+            SessionSortOrderConfig::Frecency => {
+                let mut sessions: Vec<_> = self.keys().map(|s| s.to_owned()).collect();
+                sessions.sort_by(|a, b| {
+                    let score_a = config.get_session_frecency_score(a);
+                    let score_b = config.get_session_frecency_score(b);
+                    score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                sessions
+            }
+        }
+    }
 }
 
 pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
@@ -120,6 +141,7 @@ pub fn create_sessions(config: &Config) -> Result<impl SessionContainer> {
 /// Create a streaming session channel that yields sessions as repositories are found
 /// Returns a tuple of (display_names_receiver, session_container)
 /// The session_container will be populated as sessions are found
+/// If frecency sorting is enabled, this will collect all sessions first, sort them, then stream them
 pub async fn create_sessions_streaming(config: &Config) -> Result<(mpsc::UnboundedReceiver<String>, std::sync::Arc<std::sync::Mutex<BTreeMap<String, Session>>>)> {
     let (tx, rx) = mpsc::unbounded_channel();
     let (session_tx, session_rx) = mpsc::unbounded_channel();
@@ -142,56 +164,116 @@ pub async fn create_sessions_streaming(config: &Config) -> Result<(mpsc::Unbound
         }
     });
 
-    // Process sessions and bookmarks
-    let bookmarks = config.bookmark_paths();
+    // Check if we need frecency sorting
+    let use_frecency = matches!(config.session_sort_order.as_ref(), Some(SessionSortOrderConfig::Frecency));
     
-    // Send bookmarks first (they're instantly available)
-    for bookmark_path in bookmarks {
-        let bookmark_name = bookmark_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+    if use_frecency {
+        // For frecency sorting, collect all sessions first, then sort and stream them
+        let config_clone = config.clone();
+        let sessions_map_clone2 = sessions_map_clone.clone();
+        tokio::spawn(async move {
+            let mut all_sessions = Vec::new();
             
-        let visible_name = if config.display_full_path == Some(true) {
-            bookmark_path.display().to_string()
-        } else {
-            bookmark_name.clone()
-        };
-        
-        // Store the bookmark session in our map
-        let bookmark_session = Session::new(bookmark_name, SessionType::Bookmark(bookmark_path));
-        if let Ok(mut map) = sessions_map_clone.lock() {
-            map.insert(visible_name.clone(), bookmark_session);
-        }
-        
-        if tx.send(visible_name).is_err() {
-            break; // Receiver was dropped
-        }
-    }
-    
-    let config_clone = config.clone();
-    let sessions_map_clone2 = sessions_map_clone.clone();
-    // Process streaming repository sessions
-    tokio::spawn(async move {
-        let mut session_rx = session_rx;
-        while let Some(session) = session_rx.recv().await {
-            let visible_name = if config_clone.display_full_path == Some(true) {
-                session.path().display().to_string()
+            // First, send bookmarks
+            let bookmarks = config_clone.bookmark_paths();
+            for bookmark_path in bookmarks {
+                let bookmark_name = bookmark_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                    
+                let visible_name = if config_clone.display_full_path == Some(true) {
+                    bookmark_path.display().to_string()
+                } else {
+                    bookmark_name.clone()
+                };
+                
+                let bookmark_session = Session::new(bookmark_name, SessionType::Bookmark(bookmark_path));
+                all_sessions.push((visible_name, bookmark_session));
+            }
+            
+            // Collect streaming sessions
+            let mut session_rx = session_rx;
+            while let Some(session) = session_rx.recv().await {
+                let visible_name = if config_clone.display_full_path == Some(true) {
+                    session.path().display().to_string()
+                } else {
+                    session.name.clone()
+                };
+                
+                all_sessions.push((visible_name, session));
+            }
+            
+            // Sort by frecency score
+            all_sessions.sort_by(|(name_a, _), (name_b, _)| {
+                let score_a = config_clone.get_session_frecency_score(name_a);
+                let score_b = config_clone.get_session_frecency_score(name_b);
+                score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            
+            // Now stream the sorted sessions
+            for (visible_name, session) in all_sessions {
+                if let Ok(mut map) = sessions_map_clone2.lock() {
+                    map.insert(visible_name.clone(), session);
+                }
+                
+                if tx.send(visible_name).is_err() {
+                    break; // Receiver was dropped
+                }
+            }
+        });
+    } else {
+        // For non-frecency sorting, use original streaming approach
+        // Process bookmarks first (they're instantly available)
+        let bookmarks = config.bookmark_paths();
+        for bookmark_path in bookmarks {
+            let bookmark_name = bookmark_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+                
+            let visible_name = if config.display_full_path == Some(true) {
+                bookmark_path.display().to_string()
             } else {
-                session.name.clone()
+                bookmark_name.clone()
             };
             
-            // Store the session in our map
-            if let Ok(mut map) = sessions_map_clone2.lock() {
-                map.insert(visible_name.clone(), session);
+            // Store the bookmark session in our map
+            let bookmark_session = Session::new(bookmark_name, SessionType::Bookmark(bookmark_path));
+            if let Ok(mut map) = sessions_map_clone.lock() {
+                map.insert(visible_name.clone(), bookmark_session);
             }
             
             if tx.send(visible_name).is_err() {
                 break; // Receiver was dropped
             }
         }
-    });
+        
+        let config_clone = config.clone();
+        let sessions_map_clone2 = sessions_map_clone.clone();
+        // Process streaming repository sessions
+        tokio::spawn(async move {
+            let mut session_rx = session_rx;
+            while let Some(session) = session_rx.recv().await {
+                let visible_name = if config_clone.display_full_path == Some(true) {
+                    session.path().display().to_string()
+                } else {
+                    session.name.clone()
+                };
+                
+                // Store the session in our map
+                if let Ok(mut map) = sessions_map_clone2.lock() {
+                    map.insert(visible_name.clone(), session);
+                }
+                
+                if tx.send(visible_name).is_err() {
+                    break; // Receiver was dropped
+                }
+            }
+        });
+    }
     
     Ok((rx, sessions_map))
 }
