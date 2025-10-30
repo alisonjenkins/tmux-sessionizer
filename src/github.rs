@@ -85,8 +85,8 @@ impl GitHubClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: Failed to get GitHub token: {}", stderr);
-            return Err(TmsError::GitError.into());
+            return Err(error_stack::Report::new(TmsError::GitError)
+                .attach_printable(format!("Failed to get GitHub token: {}", stderr)));
         }
 
         let token = String::from_utf8(output.stdout)
@@ -95,7 +95,8 @@ impl GitHubClient {
             .to_string();
             
         if token.is_empty() {
-            return Err(TmsError::GitError.into());
+            return Err(error_stack::Report::new(TmsError::GitError)
+                .attach_printable("GitHub token is empty"));
         }
         
         Ok(token)
@@ -124,8 +125,8 @@ impl GitHubClient {
             if !response.status().is_success() {
                 let status = response.status();
                 let error_text = response.text().await.unwrap_or_default();
-                eprintln!("GitHub API error {}: {}", status, error_text);
-                return Err(TmsError::GitError.into());
+                return Err(error_stack::Report::new(TmsError::GitError)
+                    .attach_printable(format!("GitHub API error {}: {}", status, error_text)));
             }
 
             let page_repos: Vec<GitHubApiRepo> = response
@@ -204,8 +205,8 @@ impl GitHubClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Error cloning repository {}: {}", repo.full_name, stderr);
-            return Err(TmsError::GitError.into());
+            return Err(error_stack::Report::new(TmsError::GitError)
+                .attach_printable(format!("Failed to clone repository {}: {}", repo.full_name, stderr)));
         }
 
         Ok(repo_path)
