@@ -177,7 +177,8 @@ impl RepoProvider {
                 .ok_or(TmsError::GitError)?
                 .shorten()
                 .to_string()),
-            RepoProvider::Jujutsu(_) => Err(TmsError::GitError.into()),
+            RepoProvider::Jujutsu(_) => Err(error_stack::Report::new(TmsError::GitError)
+                .attach_printable("head_name is not supported for Jujutsu repositories")),
         }
     }
     pub fn submodules(&'_ self) -> Result<Option<impl Iterator<Item = Submodule<'_>>>> {
